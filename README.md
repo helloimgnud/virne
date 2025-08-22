@@ -19,7 +19,7 @@
 
 
 <p align="center">
-  <a href="resources/pdfs/virne_benchmark_paper.pdf">✨ Benchmark Paper</a> &nbsp;&nbsp;•&nbsp;&nbsp;
+  <a href="https://arxiv.org/abs/2507.19234">✨ Benchmark Paper</a> &nbsp;&nbsp;•&nbsp;&nbsp;
   <a href="https://virne.readthedocs.io">Documentation</a> &nbsp;&nbsp;•&nbsp;&nbsp;
   <a href="https://github.com/GeminiLight/virne?tab=readme-ov-file#citations">Citations</a> &nbsp;&nbsp;•&nbsp;&nbsp;
   <a href="https://github.com/GeminiLight/sdn-nfv-papers">SDN-NFV Papers</a>
@@ -52,12 +52,13 @@ Virne offers a unified and comprehensive framework for NFV-RA, with the followin
 
 #### Benchmark Paper
 
-**[arXiv, 2025] Virne**
+**[arXiv, 2025] Virne** ([paper](https://arxiv.org/abs/2507.19234)) & [code](https://github.com/GeminiLight/virne)
 
 ```bibtex
 @article{tfwang-2025-virne,
   title={Virne: A Comprehensive Benchmark for Deep RL-based Network Resource Allocation in NFV},
   author={Wang, Tianfu and Deng, Liwei and Chen, Xi and Wang, Junyang and He, Huiguo and Ding, Leilei and Wu, Wei and Fan, Qilin and Xiong, Hui},
+  journal={arXiv preprint arXiv:2507.19234},
   year={2025},
 }
 ```

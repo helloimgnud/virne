@@ -82,13 +82,14 @@ Citations
 Benchmark Paper
 ~~~~~~~~~~~~~~~
 
-**Virne Benchmark** (paper`  & `code <https://github.com/GeminiLight/virne>`__)
+**Virne Benchmark** (`paper <https://arxiv.org/abs/2507.19234>`__ & `code <https://github.com/GeminiLight/virne>`__)
 
 ..  code-block:: bib
 
     @article{tfwang-2025-virne,
       title={Virne: A Comprehensive Benchmark for Deep RL-based Network Resource Allocation in NFV},
       author={Wang, Tianfu and Deng, Liwei and Chen, Xi and Wang, Junyang and He, Huiguo and Ding, Leilei and Wu, Wei and Fan, Qilin and Xiong, Hui},
+      journal={arXiv preprint arXiv:2507.19234},
       year={2025},
     }
 
