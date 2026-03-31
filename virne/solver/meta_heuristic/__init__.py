@@ -17,6 +17,6 @@ __all__ = [
     'INFEASIBLE_FITNESS',
     'SimulatedAnnealingSolver',
     'TabuSearchSolver',
-    # 'ISGeneticAlgorithmSolver',
     'FastHPSOSolver'
+    # 'ISGeneticAlgorithmSolver',
 ]
