@@ -5,6 +5,7 @@ from .base_meta_heuristic_solver import Individual, BaseMetaHeuristicSolver, INF
 from .simulated_annealing_solver import SimulatedAnnealingSolver
 from .tabu_search_solver import TabuSearchSolver
 # from .infeasiblity_servival_genetic_algorithm_solver import ISGeneticAlgorithmSolver
+from .fast_hpso_solver import FastHPSOSolver
 
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     'SimulatedAnnealingSolver',
     'TabuSearchSolver',
     # 'ISGeneticAlgorithmSolver',
+    'FastHPSOSolver'
 ]
