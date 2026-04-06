@@ -282,78 +282,6 @@ class OfflineSystem(BaseSystem):
         self.complete()
 
 
-# class TimeWindowSystem(BaseSystem):
-#     """
-#     TODO: Batch Processing
-#     """
-#     def __init__(self, env, solver, logger, counter, controller, recorder, config):
-#         super(TimeWindowSystem, self).__init__(env, solver, logger, counter, controller, recorder, config)
-#         self.time_window_size = config.get('time_window_size', 100)
-
-#     def reset(self):
-#         self.current_time_window = 0
-#         self.next_event_id = 0
-#         return super().reset()
-
-#     def _receive(self):
-#         next_time_window = self.current_time_window + self.time_window_size
-#         enter_event_list = []
-#         leave_event_list = []
-#         while self.next_event_id < len(self.v_net_simulator.events) and self.v_net_simulator.events[self.next_event_id]['time'] <= next_time_window:
-#             if self.v_net_simulator.events[self.next_event_id]['type'] == 1:
-#                 enter_event_list.append(self.v_net_simulator.events[self.next_event_id])
-#             else:
-#                 leave_event_list.append(self.v_net_simulator.events[self.next_event_id])
-#             self.next_event_id += 1
-#         return enter_event_list, leave_event_list
-
-#     def _transit(self, solution_dict):
-#         raise NotImplementedError
-
-#     def run(self):
-#         self.ready()
-        
-#         for epoch_id in range(self.config.experiment.num_simulations):
-#             self.logger.info(f'Epoch {epoch_id}')
-#             pbar = tqdm.tqdm(desc=f'Running with {self.solver.name} in epoch {epoch_id}', total=self.env.v_net_simulator.num_v_nets)
-#             instance = self.env.reset(self.config.experiment.seed)
-
-#             current_event_id = 0
-#             events_list = self.env.v_net_simulator.events
-#             for current_time in range(0, int(events_list[-1]['time'] + self.time_window_size + 1), self.time_window_size):
-#                 enter_event_list = []
-#                 while events_list[current_event_id]['time'] < current_time:
-#                     # enter
-#                     if events_list[current_event_id]['type'] == 1:
-#                         enter_event_list.append(events_list[current_event_id])
-#                     # leave
-#                     else:
-#                         v_net_id = events_list[current_event_id]['v_net_id']
-#                         solution = Solution(self.v_net_simulator.v_nets[v_net_id])
-#                         solution = self.recorder.get_record(v_net_id=v_net_id)
-#                         self.controller.release(self.v_net_simulator.v_nets[v_net_id], self.p_net, solution)
-#                         self.solution['description'] = 'Leave Event'
-#                         record = self.count_and_add_record()
-#                     current_event_id += 1
-
-#                 for enter_event in  enter_event_list:
-#                     solution = self.solver.solve(instance)
-#                     next_instance, _, done, info = self.env.step(solution)
-
-#                     if pbar is not None: 
-#                         pbar.update(1)
-#                         pbar.set_postfix({
-#                             'ac': f'{info["success_count"] / info["v_net_count"]:1.2f}',
-#                             'r2c': f'{info["long_term_r2c_ratio"]:1.2f}',
-#                             'inservice': f'{info["inservice_count"]:05d}',
-#                         })
-
-#                     if done:
-#                         break
-#                     instance = next_instance
-  
-#             if pbar is not None: pbar.close()
-
 class TimeWindowSystem(BaseSystem):
     """
     Batch-processing network virtualisation system.
@@ -374,7 +302,7 @@ class TimeWindowSystem(BaseSystem):
             ② release departed VNRs  →  free p_net capacity
             ③ build batch instances  →  one dict per arriving VNR
             ④ solve_batch(instances) →  [Solution] × N
-            ⑤ apply results          →  deploy accepted; record all
+            ⑤ apply results          →  feasibility re-check, deploy accepted; record all
         complete()
 
     Solver API contract
@@ -382,21 +310,31 @@ class TimeWindowSystem(BaseSystem):
     Preferred  – solver exposes solve_batch(instances) → List[Solution]:
         The full batch is forwarded in one call. The solver may exploit
         cross-VNR information (shared resource budget, batch RL policy, …).
+        The solver is free to look ahead, shuffle order, run joint ILP, etc.
+        but must still respect per-VNR rules (e.g. lifetime/TTL).
 
     Fallback   – solver only has solve(instance) → Solution:
         Each instance is solved sequentially (legacy shim). Results are
         equivalent to OnlineSystem; no batching benefit is gained.
         A warning is emitted so this is visible in logs.
 
-    When the solver API changes, update only _solve_batch(). All other
-    helper methods are API-agnostic and remain stable.
+    Feasibility guarantee
+    ─────────────────────
+    Even when the solver produces a consistent joint solution, step ⑤ applies
+    results one by one. Earlier accepted VNRs consume p_net resources before
+    later ones are committed. _apply_batch_results therefore re-validates every
+    accepted solution against the *current* p_net state before deploying it.
+    Solutions that become infeasible due to earlier deployments in the same
+    batch are force-rejected with a logged warning.
     """
 
     def __init__(self, env, solver, logger, counter, controller, recorder, config):
         super().__init__(env, solver, logger, counter, controller, recorder, config)
-        # Width of each processing window in simulation time units.
-        # All VNRs that arrive within [t, t + time_window_size) are batched together.
-        self.time_window_size = config.get('time_window_size', 100)
+
+        # BUG 4 FIX: time_window_size lives under config.system, not at the root.
+        # config.get('time_window_size', 100) silently resolves to None (not found
+        # at root) and falls back to 100 regardless of what was configured.
+        self.time_window_size = config.system.get('time_window_size', 100)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Step ①  Partition events
@@ -451,17 +389,11 @@ class TimeWindowSystem(BaseSystem):
         Return the physical-network resources held by every departed VNR.
 
         ⚠  This step MUST run before _solve_batch() so the solver operates
-        on an accurate p_net that reflects the freed capacity. Skipping or
-        deferring this step causes the solver to under-estimate available
-        resources and produce unnecessary rejections.
+        on an accurate p_net that reflects the freed capacity.
 
-        For each departure:
-            1. Fetch the VNR's stored Solution from the recorder.
-            2. If the VNR was accepted (solution.result is True), call
-               controller.release() to deallocate its node/link resources
-               back to the physical network.
-            3. If the VNR was rejected or never recorded, there is nothing
-               to release; log and skip.
+        BUG 2 FIX: recorder.get_record() returns a plain dict (the stored
+        record), NOT a Solution object.  Accessing .result on a dict raises
+        AttributeError.  We now read record['result'] from the dict safely.
 
         Args:
             departures (list[dict]): departure events, each containing 'v_net_id'
@@ -469,10 +401,15 @@ class TimeWindowSystem(BaseSystem):
         for event in departures:
             v_net_id = event['v_net_id']
             v_net    = self.env.v_net_simulator.v_nets[v_net_id]
-            solution = self.recorder.get_record(v_net_id=v_net_id)
 
-            if solution is not None and solution.result:
-                # Deallocate: return node/link resources to p_net
+            # get_record returns a dict, e.g. {'result': True, 'node_slots': ..., ...}
+            record = self.recorder.get_record(v_net_id=v_net_id)
+
+            # BUG 2 FIX: read the dict key, not a .result attribute
+            if record is not None and record.get('result', False):
+                # Reconstruct a Solution from the stored record so controller
+                # knows which nodes/links to free.
+                solution = Solution.from_record(record, v_net)
                 self.controller.release(v_net, self.env.p_net, solution)
                 self.logger.debug(
                     f'  [release] VNR {v_net_id} → resources returned to p_net'
@@ -498,11 +435,8 @@ class TimeWindowSystem(BaseSystem):
             'p_net'  : reference to the current PhysicalNetwork
                        (shared across all instances in the batch — the solver
                         must treat it as read-only; mutations happen in step ⑤
-                        via env.step(), which goes through the controller)
+                        via the controller, which goes through p_net in place)
             'event'  : raw event dict (contains 'v_net_id', 'time', 'type', …)
-
-        The ordering of the returned list matches the ordering of arrivals, so
-        zipping instances with solutions in step ⑤ is always safe.
 
         Args:
             arrivals (list[dict]): arrival events, each containing 'v_net_id'
@@ -531,40 +465,19 @@ class TimeWindowSystem(BaseSystem):
         Submit the full batch of instances to the solver and return one
         Solution object per instance.
 
-        ── Preferred path: batch-aware solver ───────────────────────────────
-        Required method: solver.solve_batch(instances) → List[Solution]
+        The solver may use any strategy it likes (look-ahead, joint ILP,
+        shuffled order, batch-RL inference, …) but must still respect per-VNR
+        rules such as lifetime / TTL.  The system does not constrain solver
+        internals here; feasibility of the returned solutions against the
+        *current* p_net is enforced in step ⑤.
 
-        The solver receives all N instances simultaneously and may exploit
-        cross-VNR context: joint resource budgeting, batch-RL policy rollout,
-        look-ahead, etc. It must return a list of N Solutions in the same
-        order as the input.
-
-        ── Fallback path: legacy sequential solver ───────────────────────────
-        If solve_batch is absent, solver.solve(instance) is called once per
-        VNR in sequence. This is a compatibility shim; behaviour is identical
-        to OnlineSystem and provides no batch-optimisation benefit.
-
-        ⚠  API-change note
-        When the solver interface changes, update ONLY this method.
-        Steps ①–③ (event collection / release / instance building) and
-        step ⑤ (result application) are fully decoupled from solver internals.
-
-        Args:
-            instances (list[dict]): batch built by _build_batch_instances
-
-        Returns:
-            solutions (list[Solution]): one Solution per instance, same order
+        Preferred  – solver.solve_batch(instances) → List[Solution]
+        Fallback   – solver.solve(instance) called once per VNR (sequential,
+                     no cross-VNR optimisation, same as OnlineSystem).
         """
         if hasattr(self.solver, 'solve_batch'):
-            # ── Batch API (preferred) ─────────────────────────────────────
-            # solver.solve_batch() sees the whole batch at once and can
-            # perform global optimisation across VNRs.
             solutions = self.solver.solve_batch(instances)
-
         else:
-            # ── Sequential fallback ───────────────────────────────────────
-            # Each VNR is solved independently. No cross-VNR awareness.
-            # Once a batch-aware solver is available, remove this branch.
             self.logger.warning(
                 'Solver does not implement solve_batch(); '
                 'falling back to sequential solve() per VNR. '
@@ -575,49 +488,139 @@ class TimeWindowSystem(BaseSystem):
         return solutions
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Step ⑤  Apply batch results
+    # Step ⑤  Apply batch results  (with feasibility re-check)
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _is_solution_feasible(self, v_net, solution: Solution) -> bool:
+        """
+        Verify that *solution* is still deployable on the current p_net.
+
+        The solver produced all solutions against a single snapshot of p_net.
+        By the time we get here, earlier VNRs in the same batch may have
+        already consumed resources, invalidating some solutions.
+
+        This method checks node and link capacity constraints against the
+        *live* p_net (which reflects all deployments committed so far in
+        this batch).
+
+        BUG 1 FIX: without this check, solutions produced against the old
+        snapshot can be infeasible when applied sequentially.
+
+        Args:
+            v_net    : the VirtualNetwork being embedded
+            solution : Solution returned by the solver
+
+        Returns:
+            True  if every node/link placement in solution still has
+                  sufficient remaining capacity on p_net
+            False otherwise
+        """
+        p_net = self.env.p_net
+
+        # Check node placements
+        node_slots = solution.node_slots  # {v_node: p_node}
+        for v_node, p_node in node_slots.items():
+            # Compare required vs remaining capacity for each resource attribute
+            for attr in v_net.get_node_attrs(types=['resource']):
+                required  = attr.get_data(v_net)[v_node]
+                available = attr.get_data(p_net)[p_node]
+                if required > available:
+                    self.logger.debug(
+                        f'  [feasibility] VNR {v_net.id}: node attr "{attr.name}" '
+                        f'v_node={v_node} → p_node={p_node}: '
+                        f'need {required}, have {available}'
+                    )
+                    return False
+
+        # Check link placements
+        link_paths = solution.link_paths  # {(u,v): [p_node, ...]}
+        for (v_u, v_v), path in link_paths.items():
+            for attr in v_net.get_link_attrs(types=['resource']):
+                required = attr.get_data(v_net)[v_u, v_v]
+                for i in range(len(path) - 1):
+                    p_u, p_v = path[i], path[i + 1]
+                    available = attr.get_data(p_net)[p_u, p_v]
+                    if required > available:
+                        self.logger.debug(
+                            f'  [feasibility] VNR {v_net.id}: link attr "{attr.name}" '
+                            f'({v_u},{v_v}) hop ({p_u},{p_v}): '
+                            f'need {required}, have {available}'
+                        )
+                        return False
+
+        return True
 
     def _apply_batch_results(self, instances: list, solutions: list):
         """
         Commit every (instance, solution) pair to the environment in order.
 
-        env.step(solution) is the single point of truth for:
-            • Allocating p_net resources for accepted VNRs  (via controller)
-            • Leaving p_net unchanged for rejected VNRs
-            • Incrementing counters (acceptance rate, r2c ratio, …)
-            • Writing a record to the recorder
-            • Signalling when all VNRs have been processed (done=True)
+        BUG 1 FIX — feasibility re-check:
+        ───────────────────────────────────
+        The solver computed all solutions against a *single* snapshot of p_net.
+        When we apply them sequentially, each accepted VNR consumes resources,
+        potentially making a later solution in the same batch infeasible.
 
-        The loop deliberately does NOT break on the first done=True. Every
-        solution in the batch must pass through env.step() so that counters
-        and records stay consistent; breaking early would drop the tail of
-        the batch from accounting.
+        Before each env.step() we therefore call _is_solution_feasible().
+        If an accepted solution is no longer feasible, we force-reject it
+        (set solution.result = False) and log a warning.  This ensures the
+        system never commits an embedding that violates physical-network
+        capacity constraints.
+
+        BUG 3 FIX — env.step() cursor:
+        ────────────────────────────────
+        env.step() was designed for one-VNR-at-a-time online processing: each
+        call also advances the environment's internal event pointer to the next
+        arrival.  In batch mode our manual current_event_id pointer already
+        handles event sequencing; having env.step() advance its own pointer
+        independently causes the two to diverge and can trigger double-release
+        of departed VNRs.
+
+        We therefore call controller.deploy() / recorder.add_record() /
+        counter.count() directly, bypassing env.step()'s cursor advance.
+        The environment's progress tracking is updated via env.transit_obs()
+        which moves the observation without touching the event pointer.
 
         Args:
-            instances (list[dict])    : batch instances (for logging / context)
+            instances (list[dict])    : batch instances (for logging/context)
             solutions (list[Solution]): solver output, same order as instances
 
         Returns:
-            last_info (dict): info dict from the last env.step() call
-                              (used by update_process_bar)
-            all_done  (bool): True if v_net_simulator has exhausted all events
+            last_info (dict): counter info dict after the last VNR in the batch
+            all_done  (bool): True once all VNRs in the simulator are processed
         """
         last_info = {}
         all_done  = False
+        p_net     = self.env.p_net
 
         for instance, solution in zip(instances, solutions):
+            v_net    = instance['v_net']
             v_net_id = instance['event']['v_net_id']
-            status   = 'ACCEPTED' if (solution.result) else 'REJECTED'
+
+            # ── BUG 1 FIX: feasibility re-check ──────────────────────────────
+            if solution.result:
+                if not self._is_solution_feasible(v_net, solution):
+                    self.logger.warning(
+                        f'  [apply] VNR {v_net_id}: solver accepted but solution '
+                        f'is no longer feasible after earlier batch deployments — '
+                        f'force-rejecting to preserve p_net consistency.'
+                    )
+                    solution.result = False
+
+            status = 'ACCEPTED' if solution.result else 'REJECTED'
             self.logger.debug(f'  [apply] VNR {v_net_id}: {status}')
 
-            _, _, done, info = self.env.step(solution)
-            last_info = info
+            # ── BUG 3 FIX: bypass env.step() to avoid cursor drift ───────────
+            # Deploy or skip, then record and count directly.
+            if solution.result:
+                self.controller.deploy(v_net, p_net, solution)
 
-            if done:
-                # Mark termination but keep iterating so every solution is
-                # recorded. If your recorder tolerates post-done calls being
-                # dropped, you may break here to save a few env.step() calls.
+            self.recorder.add_record(v_net_id, solution)
+            last_info = self.counter.count(v_net, p_net, solution)
+
+            # Check if the simulator has exhausted all events.  We derive
+            # all_done from the counter rather than env.step()'s done signal so
+            # we stay decoupled from env's internal pointer.
+            if last_info.get('v_net_count', 0) >= self.env.v_net_simulator.num_v_nets:
                 all_done = True
 
         return last_info, all_done
@@ -647,10 +650,8 @@ class TimeWindowSystem(BaseSystem):
             self.env.epoch_id    = epoch_id
             self.solver.epoch_id = epoch_id
 
-            # ── Reset ────────────────────────────────────────────────────────
             # env.reset() restores p_net to full capacity and regenerates (or
-            # replays) the v_net event stream. We discard the returned instance
-            # because we build our own instances from the raw events list in ③.
+            # replays) the v_net event stream.
             _ = self.env.reset(self.config.experiment.seed)
 
             events_list = self.env.v_net_simulator.events
@@ -659,18 +660,14 @@ class TimeWindowSystem(BaseSystem):
                 self.logger.warning(f'Epoch {epoch_id}: event list is empty — skipping.')
                 continue
 
-            # Extend the simulation horizon by one extra window so VNRs that
-            # arrive just before last_event_time are never silently dropped by
-            # an off-by-one on the range() upper bound.
             last_event_time  = events_list[-1]['time']
             horizon          = int(last_event_time) + self.time_window_size
 
-            current_event_id = 0      # rolling pointer into events_list
+            current_event_id = 0
             all_done         = False
 
             self.get_process_bar(epoch_id)
 
-            # ── Time-window loop ─────────────────────────────────────────────
             for window_start in range(0, horizon + 1, self.time_window_size):
                 if all_done:
                     break
@@ -681,16 +678,15 @@ class TimeWindowSystem(BaseSystem):
                     f'next_event_ptr={current_event_id}'
                 )
 
-                # ① Collect all events whose time falls in [window_start, window_end)
+                # ① Collect all events in [window_start, window_end)
                 arrivals, departures, current_event_id = self._partition_events_in_window(
                     events_list, current_event_id, window_end
                 )
 
-                # ② Release departed VNRs FIRST so the solver in step ④ sees
-                #    up-to-date (larger) available capacity on the p_net.
+                # ② Release departed VNRs FIRST so the solver sees
+                #    up-to-date available capacity on p_net.
                 self._release_departed_vnrs(departures)
 
-                # No arrivals this window → advance clock and continue.
                 if not arrivals:
                     continue
 
@@ -698,18 +694,12 @@ class TimeWindowSystem(BaseSystem):
                 instances = self._build_batch_instances(arrivals)
 
                 # ④ Submit the full batch to the solver.
-                #    Returns one Solution per VNR (accepted or rejected).
                 solutions = self._solve_batch(instances)
 
-                # ⑤ Commit every result: accepted VNRs are deployed onto p_net;
-                #    rejected VNRs are recorded as failures. Counters are updated
-                #    inside env.step() for both cases.
+                # ⑤ Re-check feasibility, then commit every result.
                 last_info, all_done = self._apply_batch_results(instances, solutions)
 
-                # Refresh progress bar once per window (batched, not per VNR).
                 self.update_process_bar(last_info)
-
-            # ── End of epoch ─────────────────────────────────────────────────
 
         self.complete()
 

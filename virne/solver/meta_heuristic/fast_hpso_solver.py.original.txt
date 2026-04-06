@@ -14,16 +14,6 @@
 #   - Final deployment uses controller.deploy_with_node_slots (inplace=False)
 #     so the base-class solve() can call controller.deploy() on the real p_net
 #   - counter.count_solution fills all revenue/cost fields expected by Recorder
-#
-# TimeWindowSystem integration (ADDED):
-#   - solve_batch(instances) → List[Solution] implements the batch API required
-#     by TimeWindowSystem._solve_batch().
-#   - Strategy: sequential greedy on a shared working copy of p_net.
-#     VNRs are sorted by total resource demand (hardest first). After each
-#     accepted VNR, its resources are committed to the working copy so
-#     subsequent VNRs in the same batch see correct remaining capacity.
-#     This guarantees jointly-feasible solutions before the system's own
-#     re-check in _apply_batch_results.
 # ==============================================================================
 
 import copy
@@ -224,42 +214,7 @@ def _sa_neighbor(particle: list, p_net: PhysicalNetwork, v_net: VirtualNetwork) 
 
 
 # ============================================================
-# 5.  Batch helpers  (NEW — used only by solve_batch)
-# ============================================================
-
-def _total_v_net_demand(v_net: VirtualNetwork) -> float:
-    """
-    Scalar measure of how resource-hungry a VNR is.
-
-    Sums all node resource demands and all link resource demands across
-    every attribute.  Used by solve_batch to sort VNRs hardest-first, which
-    is the standard greedy heuristic for bin-packing-style problems: placing
-    the most demanding requests first leaves the remaining space easier to fill.
-
-    Args:
-        v_net: VirtualNetwork whose total demand is measured.
-
-    Returns:
-        Non-negative float — larger means more demanding.
-    """
-    node_res_attrs = [a.name for a in v_net.get_node_attrs(types=['resource'])]
-    link_res_attrs = [a.name for a in v_net.get_link_attrs(types=['resource'])]
-
-    node_demand = sum(
-        v_net.nodes[v].get(attr, 0)
-        for v in v_net.nodes()
-        for attr in node_res_attrs
-    )
-    link_demand = sum(
-        v_net.edges[e].get(attr, 0)
-        for e in v_net.edges()
-        for attr in link_res_attrs
-    )
-    return float(node_demand + link_demand)
-
-
-# ============================================================
-# 6.  Solver class
+# 5.  Solver class
 # ============================================================
 
 @SolverRegistry.register(solver_name='fast_hpso', solver_type='meta_heuristic')
@@ -283,40 +238,6 @@ class FastHPSOSolver(BaseMetaHeuristicSolver):
     cooling_rate    : SA geometric cooling factor   (default 0.95)
     shortest_method : link-mapping method for final deploy (default 'k_shortest')
     k_shortest      : k for k-shortest paths        (default 10)
-
-    System compatibility
-    --------------------
-    OnlineSystem    : uses solve(instance) → Solution   [inherited from base]
-    TimeWindowSystem: uses solve_batch(instances) → List[Solution]   [added here]
-    OfflineSystem   : uses solve(instance) → Solution   [inherited from base]
-
-    solve_batch strategy
-    --------------------
-    The solver receives all VNRs that arrived in the same time window at once.
-    It may exploit global information (joint resource budget, ordering, etc.).
-
-    This implementation uses a *sequential greedy with shared state* approach:
-
-        1. Deep-copy the p_net snapshot so the real network is never touched
-           during the solving phase.
-        2. Sort VNRs by total resource demand, largest first (hardest-first
-           greedy — a standard heuristic for bin-packing-style problems).
-        3. For each VNR in that order, run the full HPSO+SA loop against the
-           working copy of p_net.  If the VNR is accepted, commit its solution
-           to the working copy immediately so the next VNR sees accurate
-           remaining capacity.
-        4. Collect results and return them in the original arrival order so
-           TimeWindowSystem._apply_batch_results can zip them with instances.
-
-    The working-copy deployment ensures the returned solutions are jointly
-    feasible.  TimeWindowSystem._apply_batch_results still re-validates each
-    solution against the live p_net before committing (Bug-1 fix), so any
-    edge-case inconsistency between the working copy and the live p_net is
-    caught and force-rejected rather than committed.
-
-    To integrate a different algorithm into TimeWindowSystem, the only
-    requirement is implementing this same solve_batch signature.  See
-    README_TimeWindowSystem.md §4 for a step-by-step guide.
     """
 
     def __init__(
@@ -361,11 +282,8 @@ class FastHPSOSolver(BaseMetaHeuristicSolver):
         """
         Attempt to deploy the given particle via the framework's controller.
 
-        Uses inplace=False so the p_net passed in is NOT modified here.
-        For OnlineSystem / OfflineSystem the base-class solve() does the real
-        deployment afterward.  For solve_batch the caller is responsible for
-        committing the solution to the working copy when inplace behaviour is
-        needed (see solve_batch below).
+        Uses inplace=False so the actual p_net is NOT modified here;
+        the base-class solve() calls controller.deploy() for the real update.
         """
         node_slots = self._particle_to_node_slots(particle, v_net)
         solution = Solution.from_v_net(v_net)
@@ -374,7 +292,7 @@ class FastHPSOSolver(BaseMetaHeuristicSolver):
             p_net,
             node_slots,
             solution,
-            inplace=False,                     # dry-run: validates on a copy
+            inplace=False,                     # dry-run on a copy of p_net
             shortest_method=self.shortest_method,
             k_shortest=self.k_shortest,
         )
@@ -382,18 +300,12 @@ class FastHPSOSolver(BaseMetaHeuristicSolver):
         return solution
 
     # ------------------------------------------------------------------
-    # Main algorithm  (called by BaseMetaHeuristicSolver.solve for online use)
+    # Main algorithm  (called by BaseMetaHeuristicSolver.solve)
     # ------------------------------------------------------------------
 
     def meta_run(self, v_net: VirtualNetwork, p_net: PhysicalNetwork) -> Solution:
         """
         Run the HPSO+SA main loop and return the best feasible Solution found.
-
-        This method is called:
-          - Directly by BaseMetaHeuristicSolver.solve() for OnlineSystem /
-            OfflineSystem (one VNR at a time).
-          - From solve_batch() for TimeWindowSystem, with p_net being a
-            working copy that already reflects earlier batch deployments.
 
         The loop:
           1. Init swarm with smart CPU-aware placement.
@@ -505,125 +417,3 @@ class FastHPSOSolver(BaseMetaHeuristicSolver):
                     break
 
         return solution
-
-    # ------------------------------------------------------------------
-    # Batch entry point  (NEW — called by TimeWindowSystem._solve_batch)
-    # ------------------------------------------------------------------
-
-    def solve_batch(self, instances: list) -> list:
-        """
-        Solve an entire batch of VNR instances simultaneously.
-
-        Called by TimeWindowSystem._solve_batch() when all VNRs that arrived
-        within the same time window are submitted together.
-
-        Unlike solve() (one VNR at a time), this method sees the full batch
-        and can exploit global information.  The strategy here is:
-
-            Sequential greedy on a shared working copy of p_net
-            ─────────────────────────────────────────────────────
-            ① Deep-copy the shared p_net snapshot into working_p_net.
-               The real p_net is never touched here; TimeWindowSystem
-               commits results via controller.deploy() in _apply_batch_results.
-
-            ② Sort VNRs by total resource demand, largest first.
-               Hardest-first ordering is a standard greedy heuristic: placing
-               the most demanding request first maximises the chance that a
-               feasible slot still exists for it, leaving lighter VNRs to fill
-               the remaining gaps.
-
-            ③ For each VNR in that order, call meta_run(v_net, working_p_net).
-               meta_run internally uses _fast_fitness (which reads node attrs
-               directly from working_p_net) so the swarm is guided by capacity
-               that already reflects earlier deployments in this batch.
-
-            ④ If meta_run returns solution.result == True, immediately commit
-               the solution to working_p_net via controller.deploy().
-               This reduces available capacity so the next VNR's PSO sees an
-               accurate picture of what remains.
-
-            ⑤ Collect results and return them in the original arrival order.
-               TimeWindowSystem zips solutions with instances by index, so
-               order must be preserved.
-
-        Feasibility note
-        ────────────────
-        Because each VNR is solved against a working_p_net that already
-        reflects prior accepted deployments, the returned solutions are jointly
-        feasible by construction.  TimeWindowSystem._apply_batch_results still
-        re-validates every accepted solution against the live p_net as a safety
-        net (Bug-1 fix in time_window_system_fixed.py), but under normal
-        operation no force-rejections should occur.
-
-        Args:
-            instances (list[dict]): batch produced by TimeWindowSystem.
-                Each dict has keys:
-                    'v_net'  (VirtualNetwork)  — the request to embed
-                    'p_net'  (PhysicalNetwork) — shared read-only snapshot
-                    'event'  (dict)            — raw event {'v_net_id', 'time', ...}
-
-        Returns:
-            solutions (list[Solution]): one Solution per instance, same order.
-                solution.result == True  → accepted; node_slots and link_paths
-                                           are populated with a feasible embedding
-                                           on working_p_net.
-                solution.result == False → rejected; node_slots / link_paths empty.
-        """
-        if not instances:
-            return []
-
-        # ── ① Working copy of p_net ───────────────────────────────────────────
-        # All instances share the same p_net reference (the live network).
-        # We deep-copy it once so the PSO search never modifies the real network.
-        working_p_net = copy.deepcopy(instances[0]['p_net'])
-
-        # ── ② Sort hardest-first ──────────────────────────────────────────────
-        order = sorted(
-            range(len(instances)),
-            key=lambda i: _total_v_net_demand(instances[i]['v_net']),
-            reverse=True,
-        )
-
-        self.logger.debug(
-            f'[solve_batch] batch size={len(instances)}, '
-            f'order (by demand desc)={order}'
-        )
-
-        # ── ③④ Solve each VNR; commit accepted ones to working_p_net ─────────
-        result_map: dict = {}
-        for idx in order:
-            v_net = instances[idx]['v_net']
-            v_net_id = instances[idx]['event']['v_net_id']
-
-            self.logger.debug(
-                f'[solve_batch]   solving VNR {v_net_id} '
-                f'(demand={_total_v_net_demand(v_net):.1f})'
-            )
-
-            # Run the full HPSO+SA loop against the current working_p_net.
-            # meta_run uses inplace=False internally (via _try_deploy_particle),
-            # so working_p_net is NOT modified by meta_run itself.
-            solution = self.meta_run(v_net, working_p_net)
-            result_map[idx] = solution
-
-            if solution.result:
-                # Commit to working_p_net so subsequent VNRs see reduced capacity.
-                # controller.deploy() allocates node/link resources in-place.
-                self.controller.deploy(v_net, working_p_net, solution)
-                self.logger.debug(
-                    f'[solve_batch]   VNR {v_net_id} ACCEPTED — '
-                    f'resources committed to working_p_net'
-                )
-            else:
-                self.logger.debug(
-                    f'[solve_batch]   VNR {v_net_id} REJECTED'
-                )
-
-        # ── ⑤ Restore original order ──────────────────────────────────────────
-        # TimeWindowSystem zips solutions[i] with instances[i] by index.
-        solutions = [result_map[i] for i in range(len(instances))]
-        accepted = sum(1 for s in solutions if s.result)
-        self.logger.debug(
-            f'[solve_batch] done — {accepted}/{len(instances)} accepted'
-        )
-        return solutions
