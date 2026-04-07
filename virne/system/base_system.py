@@ -507,38 +507,14 @@ class TimeWindowSystem(BaseSystem):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _is_solution_feasible(self, v_net, solution: Solution) -> bool:
-        """
-        Verify that *solution* is still deployable on the current p_net.
-
-        The solver produced all solutions against a single snapshot of p_net.
-        By the time we get here, earlier VNRs in the same batch may have
-        already consumed resources, invalidating some solutions.
-
-        This method checks node and link capacity constraints against the
-        *live* p_net (which reflects all deployments committed so far in
-        this batch).
-
-        BUG 1 FIX: without this check, solutions produced against the old
-        snapshot can be infeasible when applied sequentially.
-
-        Args:
-            v_net    : the VirtualNetwork being embedded
-            solution : Solution returned by the solver
-
-        Returns:
-            True  if every node/link placement in solution still has
-                  sufficient remaining capacity on p_net
-            False otherwise
-        """
         p_net = self.env.p_net
 
         # Check node placements
         node_slots = solution.node_slots  # {v_node: p_node}
         for v_node, p_node in node_slots.items():
-            # Compare required vs remaining capacity for each resource attribute
             for attr in v_net.get_node_attrs(types=['resource']):
-                required  = attr.get_data(v_net)[v_node]
-                available = attr.get_data(p_net)[p_node]
+                required  = v_net.nodes[v_node].get(attr.name, 0)   # FIX: use .nodes[v_node] dict
+                available = p_net.nodes[p_node].get(attr.name, 0)   # FIX: use .nodes[p_node] dict
                 if required > available:
                     self.logger.debug(
                         f'  [feasibility] VNR {v_net.id}: node attr "{attr.name}" '
@@ -551,13 +527,18 @@ class TimeWindowSystem(BaseSystem):
         link_paths = solution.link_paths  # {(u,v): [p_node, ...]}
         for (v_u, v_v), path in link_paths.items():
             for attr in v_net.get_link_attrs(types=['resource']):
-                # attr.get_data(v_net) returns a flat list for VirtualNetwork,
-                # so tuple indexing [v_u, v_v] raises TypeError.
-                # Read the required bandwidth directly from the networkx edge.
-                required = v_net[v_u][v_v].get(attr.name, 0)
+                required = v_net[v_u][v_v].get(attr.name, 0)   # v_net edge access is fine per existing comment
                 for i in range(len(path) - 1):
                     p_u, p_v = path[i], path[i + 1]
-                    available = p_net[p_u][p_v].get(attr.name, 0)
+                    # FIX: guard against missing edges and use networkx edge data dict correctly
+                    if not p_net.has_edge(p_u, p_v):
+                        self.logger.debug(
+                            f'  [feasibility] VNR {v_net.id}: link attr "{attr.name}" '
+                            f'({v_u},{v_v}) hop ({p_u},{p_v}): edge does not exist on p_net'
+                        )
+                        return False
+                    edge_data = p_net.edges[p_u, p_v]           # FIX: use .edges[] not [][] chaining
+                    available = edge_data.get(attr.name, 0)
                     if required > available:
                         self.logger.debug(
                             f'  [feasibility] VNR {v_net.id}: link attr "{attr.name}" '
