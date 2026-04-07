@@ -402,22 +402,18 @@ class TimeWindowSystem(BaseSystem):
             v_net_id = event['v_net_id']
             v_net    = self.env.v_net_simulator.v_nets[v_net_id]
 
-            # get_record returns a dict, e.g. {'result': True, 'node_slots': ..., ...}
-            # KeyError is raised (not None) when the VNR has no record yet.
-            # This happens when a VNR's arrival and departure both fall inside
-            # the same time window: the departure is processed here (step ②)
-            # before the arrival has been recorded in steps ③–⑤.
-            # In that case there is nothing to release — the VNR was never
-            # embedded — so we treat it exactly like a rejected VNR.
+            self.env.v_net = v_net
+            self.env.recorder.update_state({
+                'event_id': event['id'],
+                'event_type': 0,
+                'event_time': event['time'],
+            })
+
             try:
+                # get_record returns a dict, e.g. {'result': True, 'node_slots': ..., ...}
                 record = self.recorder.get_record(v_net_id=v_net_id)
             except KeyError:
-                record = None
-                self.logger.debug(
-                    f'  [release] VNR {v_net_id} has no record '
-                    f'(same-window arrival + departure, never embedded); '
-                    f'nothing to release'
-                )
+                continue
 
             # BUG 2 FIX: read the dict key, not a .result attribute
             if record is not None and record.get('result', False):
@@ -425,10 +421,20 @@ class TimeWindowSystem(BaseSystem):
                 # knows which nodes/links to free.
                 solution = Solution.from_record(record, v_net)
                 self.controller.release(v_net, self.env.p_net, solution)
+                
+                self.env.solution = solution
+                self.env.solution['description'] = 'Leave Event'
+                self.env.count_and_add_record()
+
                 self.logger.debug(
                     f'  [release] VNR {v_net_id} → resources returned to p_net'
                 )
             else:
+                self.env.solution = Solution.from_v_net(v_net)
+                self.env.solution.result = False
+                self.env.solution['description'] = 'Leave Event (Not Accepted)'
+                self.env.count_and_add_record()
+
                 self.logger.debug(
                     f'  [release] VNR {v_net_id} departed but was never accepted; '
                     f'nothing to release'
@@ -628,8 +634,14 @@ class TimeWindowSystem(BaseSystem):
             if solution.result:
                 self.controller.deploy(v_net, p_net, solution)
 
-            self.recorder.add_record(v_net_id, solution)
-            last_info = self.counter.count(v_net, p_net, solution)
+            self.env.v_net = v_net
+            self.env.solution = solution
+            self.env.recorder.update_state({
+                'event_id': instance['event']['id'],
+                'event_type': 1,
+                'event_time': instance['event']['time'],
+            })
+            last_info = self.env.count_and_add_record()
 
             # Check if the simulator has exhausted all events.  We derive
             # all_done from the counter rather than env.step()'s done signal so
@@ -697,11 +709,16 @@ class TimeWindowSystem(BaseSystem):
                     events_list, current_event_id, window_end
                 )
 
+                arrivals_ids = {event['v_net_id'] for event in arrivals}
+                departures_prev = [dev for dev in departures if dev['v_net_id'] not in arrivals_ids]
+                departures_curr = [dev for dev in departures if dev['v_net_id'] in arrivals_ids]
+
                 # ② Release departed VNRs FIRST so the solver sees
                 #    up-to-date available capacity on p_net.
-                self._release_departed_vnrs(departures)
+                self._release_departed_vnrs(departures_prev)
 
                 if not arrivals:
+                    self._release_departed_vnrs(departures_curr)
                     continue
 
                 # ③ Wrap each arriving VNR into a solver-ready instance dict.
@@ -712,6 +729,9 @@ class TimeWindowSystem(BaseSystem):
 
                 # ⑤ Re-check feasibility, then commit every result.
                 last_info, all_done = self._apply_batch_results(instances, solutions)
+
+                # ⑥ Release departed VNRs END
+                self._release_departed_vnrs(departures_curr)
 
                 self.update_process_bar(last_info)
 
