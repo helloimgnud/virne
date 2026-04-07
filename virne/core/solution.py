@@ -167,3 +167,17 @@ class Solution(ClassDict):
         """
         for key, value in new_dict.items():
             setattr(self, key, value)
+
+    @classmethod
+    def from_record(cls, record: dict, v_net):
+        """
+        Reconstruct a minimal Solution from a stored record dict.
+        Only the fields needed by controller.release() are populated.
+        """
+        solution = cls(v_net)
+        solution.result          = record.get('result', False)
+        solution.node_slots      = record.get('node_slots', {})
+        solution.node_slots_info = record.get('node_slots_info', {})
+        solution.link_paths      = record.get('link_paths', {})
+        solution.link_paths_info = record.get('link_paths_info', {})
+        return solution

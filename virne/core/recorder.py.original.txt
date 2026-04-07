@@ -176,11 +176,7 @@ class Recorder:
         self.state['p_net_link_resource_utilization'] = 1. - (self.state['p_net_link_available_resource'] / self.init_p_net_info['p_net_link_available_resource'])
         # Leave event
         if self.state['event_type'] == 0:
-            try:
-                departed_record = self.get_record(v_net_id=solution['v_net_id'])
-            except KeyError:
-                departed_record = None
-            if departed_record is not None and departed_record.get('result', False):
+            if self.get_record(v_net_id=solution['v_net_id'])['result']:
                 self.state['inservice_count'] -= 1
                 v_net_id = solution['v_net_id']
                 for v_node_id, p_node_id in solution['node_slots'].items():
