@@ -550,7 +550,10 @@ class TimeWindowSystem(BaseSystem):
         link_paths = solution.link_paths  # {(u,v): [p_node, ...]}
         for (v_u, v_v), path in link_paths.items():
             for attr in v_net.get_link_attrs(types=['resource']):
-                required = attr.get_data(v_net)[v_u, v_v]
+                # attr.get_data(v_net) returns a flat list for VirtualNetwork,
+                # so tuple indexing [v_u, v_v] raises TypeError.
+                # Read the required bandwidth directly from the networkx edge.
+                required = v_net[v_u][v_v].get(attr.name, 0)
                 for i in range(len(path) - 1):
                     p_u, p_v = path[i], path[i + 1]
                     available = attr.get_data(p_net)[p_u, p_v]
