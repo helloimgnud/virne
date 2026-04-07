@@ -4,7 +4,6 @@
 
 
 import os
-from sympy import im
 import tqdm
 import pprint
 import random
@@ -48,6 +47,7 @@ class BaseSystem:
         self.counter = counter
         self.logger = logger
         self.config = config
+        self.pbar = None  # initialized here; set properly by get_process_bar()
 
     @classmethod
     def from_config(cls, config):
@@ -149,8 +149,9 @@ class BaseSystem:
     def update_process_bar(self, info):
         if self.pbar is not None: 
             self.pbar.update(1)
+            v_net_count = info.get("v_net_count", 0)
             self.pbar.set_postfix({
-                'ac': f'{info["success_count"] / info["v_net_count"]:1.2f}',
+                'ac': f'{info["success_count"] / v_net_count:1.2f}' if v_net_count > 0 else 'n/a',
                 'r2c': f'{info["long_term_r2c_ratio"]:1.2f}',
                 'inservice': f'{info["inservice_count"]:05d}',
             })
@@ -556,7 +557,7 @@ class TimeWindowSystem(BaseSystem):
                 required = v_net[v_u][v_v].get(attr.name, 0)
                 for i in range(len(path) - 1):
                     p_u, p_v = path[i], path[i + 1]
-                    available = attr.get_data(p_net)[p_u, p_v]
+                    available = p_net[p_u][p_v].get(attr.name, 0)
                     if required > available:
                         self.logger.debug(
                             f'  [feasibility] VNR {v_net.id}: link attr "{attr.name}" '
