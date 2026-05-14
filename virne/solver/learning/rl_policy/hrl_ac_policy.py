@@ -35,23 +35,19 @@ class HrlAcEncoder(nn.Module):
         self.p_net_gap = GraphAttentionPooling(embedding_dim)
         self.p_net_mean_pool = GraphPooling(aggr='mean')
         self.v_net_mean_pool = GraphPooling(aggr='mean')
-        self.p_net_sum_pool  = GraphPooling(aggr='sum')
-        self.v_net_sum_pool  = GraphPooling(aggr='sum')
 
     def forward(self, p_net_batch, v_net_batch):
         # Virtual network
         v_emb = self.v_net_gnn(v_net_batch)
         v_gap  = self.v_net_gap(v_emb, v_net_batch.batch)
         v_mean = self.v_net_mean_pool(v_emb, v_net_batch.batch)
-        v_sum  = self.v_net_sum_pool(v_emb, v_net_batch.batch)
-        v_global = v_gap + v_mean + v_sum
+        v_global = v_gap + v_mean
 
         # Physical network
         p_emb = self.p_net_gnn(p_net_batch)
         p_gap  = self.p_net_gap(p_emb, p_net_batch.batch)
         p_mean = self.p_net_mean_pool(p_emb, p_net_batch.batch)
-        p_sum  = self.p_net_sum_pool(p_emb, p_net_batch.batch)
-        p_global = p_gap + p_mean + p_sum
+        p_global = p_gap + p_mean
 
         return torch.cat([p_global, v_global], dim=-1)   # (B, 2*embedding_dim)
 
