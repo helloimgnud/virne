@@ -6,10 +6,10 @@ from gym import spaces
 from torch_geometric.data import Batch
 
 from virne.solver import SolverRegistry
-from virne.solver.learning.rl_core import OnlineAgent, PPOSolver, RolloutBuffer
+from virne.solver.learning.rl_core import InstanceAgent, PPOSolver, RolloutBuffer
 from virne.solver.learning.rl_core.policy_builder import OptimizerBuilder, PolicyBuilder
 
-from virne.solver.learning.rl_core.online_rl_environment import SolutionStepRLEnv
+from virne.solver.learning.rl_core.instance_rl_environment import SolutionStepInstanceRLEnv
 from virne.core.solution import Solution
 
 from virne.solver.learning.neural_network.gnn import DeepEdgeFeatureGAT, GraphAttentionPooling, GraphPooling
@@ -125,9 +125,9 @@ def obs_as_tensor(obs, device):
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
 
-class HrlAcEnv(SolutionStepRLEnv):
-    def __init__(self, p_net, v_net_simulator, controller, recorder, counter, logger, config, **kwargs):
-        super(HrlAcEnv, self).__init__(p_net, v_net_simulator, controller, recorder, counter, logger, config, **kwargs)
+class HrlAcEnv(SolutionStepInstanceRLEnv):
+    def __init__(self, p_net, v_net, controller, recorder, counter, logger, config, **kwargs):
+        super(HrlAcEnv, self).__init__(p_net, v_net, controller, recorder, counter, logger, config, **kwargs)
         self.action_space = spaces.Discrete(2)
         
         sub_solver_name = config.solver.get('sub_solver_name', 'ppo_gat_seq2seq+') if hasattr(config.solver, 'get') else getattr(config.solver, 'sub_solver_name', 'ppo_gat_seq2seq+')
@@ -153,10 +153,14 @@ class HrlAcEnv(SolutionStepRLEnv):
         self.actual_cumulative_reward = 0
         self.global_moving_average_reward = 0
             
-    def compute_reward(self, solution):
+    def generate_action_mask(self):
+        return np.ones(2, dtype=bool)
+
+    def compute_reward(self):
         r"""Calculate deserved reward according to the result of taking action."""
+        solution = self.solution
         w_a = 1
-        w_b = solution['v_net_lifetime'] / self.v_net_simulator.v_sim_setting['lifetime']['scale']
+        w_b = solution['v_net_lifetime'] / self.config.v_sim_setting['lifetime']['scale'] if hasattr(self.config, 'v_sim_setting') else 1.0
         revenue_benchmark = 100
         if solution['result']:
             basic_reward = solution['v_net_revenue'] / revenue_benchmark
@@ -171,6 +175,7 @@ class HrlAcEnv(SolutionStepRLEnv):
         self.v_net_reward += reward
         self.global_timestep_count += 1
         self.global_cumulative_reward += reward
+
         average_reward = reward - self.global_cumulative_reward / self.global_timestep_count
         self.extra_info_dict.update({
             'actual_cumulative_reward': self.actual_cumulative_reward,
@@ -191,7 +196,9 @@ class HrlAcEnv(SolutionStepRLEnv):
             solution = Solution(self.v_net)
             solution['early_rejection'] = True
             solution['result'] = False
-        return super().step(solution)
+            
+        self.solution = solution
+        return self.get_observation(), self.compute_reward(), True, self.get_info(self.solution.to_dict())
         
     def get_observation(self):
         p_net_obs = self._get_p_net_obs()
@@ -246,11 +253,11 @@ class HrlAcEnv(SolutionStepRLEnv):
         return np.array([norm_lifetime], dtype=np.float32)
 
 @SolverRegistry.register(solver_name='hrl_ac', solver_type='r_learning')
-class HrlAcSolver(OnlineAgent, PPOSolver):
+class HrlAcSolver(InstanceAgent, PPOSolver):
     Env = HrlAcEnv
 
     def __init__(self, controller, recorder, counter, logger, config, **kwargs):
-        OnlineAgent.__init__(self)
+        InstanceAgent.__init__(self, self.Env)
         PPOSolver.__init__(self, controller, recorder, counter, logger, config, make_policy, obs_as_tensor, **kwargs)
         self.compute_return_method = 'gae'
         self.config.rl.gamma = 1.0
