@@ -8,7 +8,7 @@ from torch_geometric.data import Batch
 from virne.solver import SolverRegistry
 from virne.solver.learning.rl_core import OnlineAgent, PPOSolver, RolloutBuffer
 from virne.solver.learning.rl_core.policy_builder import OptimizerBuilder, PolicyBuilder
-from virne.solver.learning.rl_core.tensor_convertor import TensorConvertor
+
 from virne.solver.learning.rl_core.online_rl_environment import SolutionStepRLEnv
 from virne.core.solution import Solution
 
@@ -70,9 +70,10 @@ def make_policy(agent, **kwargs):
     optimizer = OptimizerBuilder.build_optimizer(agent.config, policy)
     return policy, optimizer
 
+from virne.solver.learning.utils import get_pyg_data
+
 def obs_as_tensor(obs, device):
     # one
-    get_pyg_data = TensorConvertor.get_pyg_data
     if isinstance(obs, dict):
         p_net_data = get_pyg_data(obs['p_net_x'], obs['p_net_edge_index'], obs['p_net_edge_attr'])
         v_net_data = get_pyg_data(obs['v_net_x'], obs['v_net_edge_index'], obs['v_net_edge_attr'])
