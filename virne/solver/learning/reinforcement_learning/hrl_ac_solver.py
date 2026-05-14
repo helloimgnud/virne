@@ -41,33 +41,61 @@ class Encoder(nn.Module):
         fusion_embedding = torch.concat([p_net_global_embedding, v_net_global_embedding], dim=-1) 
         return fusion_embedding
 
-class ActorCritic(nn.Module):
-    def __init__(self, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim=128):
-        super(ActorCritic, self).__init__()
-        self.encoder = Encoder(p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim)
+class Actor(nn.Module):
+    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim=128, dropout_prob=0., batch_norm=False):
+        super(Actor, self).__init__()
+        self.encoder = Encoder(p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim, dropout_prob, batch_norm)
         embedding_dims = [embedding_dim*2, embedding_dim]
-        self.actor = MLPNet(embedding_dim*2, 2, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
-        self.critic = MLPNet(embedding_dim*2, 1, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
+        self.net = MLPNet(embedding_dim*2, 2, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
 
     def act(self, obs):
-        features = self.encoder(obs['p_net'], obs['v_net'])
-        return self.actor(features)
+        return self.net(self.encoder(obs['p_net'], obs['v_net']))
+
+class Critic(nn.Module):
+    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim=128, dropout_prob=0., batch_norm=False):
+        super(Critic, self).__init__()
+        self.encoder = Encoder(p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim, dropout_prob, batch_norm)
+        embedding_dims = [embedding_dim*2, embedding_dim]
+        self.net = MLPNet(embedding_dim*2, 1, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
+
+    def evaluate(self, obs):
+        return self.net(self.encoder(obs['p_net'], obs['v_net']))
+
+class ActorCritic(nn.Module):
+    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim=128, dropout_prob=0., batch_norm=False):
+        super(ActorCritic, self).__init__()
+        self.actor = Actor(p_net_num_nodes, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim, dropout_prob, batch_norm)
+        self.critic = Critic(p_net_num_nodes, p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim, dropout_prob, batch_norm)
+
+    def act(self, obs):
+        return self.actor.act(obs)
         
     def evaluate(self, obs):
-        features = self.encoder(obs['p_net'], obs['v_net'])
-        return self.critic(features)
+        return self.critic.evaluate(obs)
 
 def make_policy(agent, **kwargs):
     feature_dim_config = PolicyBuilder.get_feature_dim_config(agent.config)
-    # The actual dims might require +3 for extra attributes depending on config
+    nn_config = PolicyBuilder.get_general_nn_config(agent.config)
     policy = ActorCritic(
+        p_net_num_nodes=feature_dim_config['p_net_num_nodes'],
         p_net_feature_dim=feature_dim_config['p_net_x_dim'] + 3,
         p_net_edge_dim=feature_dim_config['p_net_edge_dim'],
-        v_net_feature_dim=feature_dim_config['v_net_x_dim'] + 4, # node attrs + lifetime
+        v_net_feature_dim=feature_dim_config['v_net_x_dim'] + 1,
         v_net_edge_dim=feature_dim_config['v_net_edge_dim'],
-        embedding_dim=128
+        **nn_config
     ).to(agent.device)
-    optimizer = OptimizerBuilder.build_optimizer(agent.config, policy)
+    
+    scale = agent.config.rl.get('learning_rate_scale', 0.1) if hasattr(agent.config.rl, 'get') else getattr(agent.config.rl, 'learning_rate_scale', 0.1)
+    
+    # Try getting learning rate with fallback
+    lr_actor = agent.config.rl.learning_rate.actor if hasattr(agent.config.rl.learning_rate, 'actor') else agent.config.rl.learning_rate
+    lr_critic = agent.config.rl.learning_rate.critic if hasattr(agent.config.rl.learning_rate, 'critic') else agent.config.rl.learning_rate
+    
+    optimizer = torch.optim.Adam([
+        {'params': policy.actor.parameters(), 'lr': lr_actor * scale},
+        {'params': policy.critic.parameters(), 'lr': lr_critic * scale},
+    ], weight_decay=agent.config.rl.weight_decay)
+    
     return policy, optimizer
 
 from virne.solver.learning.utils import get_pyg_data
@@ -102,15 +130,20 @@ class HrlAcEnv(SolutionStepRLEnv):
         super(HrlAcEnv, self).__init__(p_net, v_net_simulator, controller, recorder, counter, logger, config, **kwargs)
         self.action_space = spaces.Discrete(2)
         
-        sub_solver_name = config.solver.get('sub_solver_name', 'ppo_gat_seq2seq+')
+        sub_solver_name = config.solver.get('sub_solver_name', 'ppo_gat_seq2seq+') if hasattr(config.solver, 'get') else getattr(config.solver, 'sub_solver_name', 'ppo_gat_seq2seq+')
         logger.info(f'Employing {sub_solver_name} as sub solver in HRL-AC')
+        if not SolverRegistry.has_solver(sub_solver_name):
+            raise NotImplementedError(
+                f'Sub-solver "{sub_solver_name}" is not registered in SolverRegistry.')
         SolverClass = SolverRegistry.get_solver(sub_solver_name)
         self.sub_solver = SolverClass(controller, recorder, counter, logger, config, **kwargs)
         
-        pretrained_subsolver_model_path = config.solver.get('pretrained_subsolver_model_path', None)
+        pretrained_subsolver_model_path = config.solver.get('pretrained_subsolver_model_path', None) if hasattr(config.solver, 'get') else getattr(config.solver, 'pretrained_subsolver_model_path', None)
         if pretrained_subsolver_model_path:
             logger.info('Loading pretrained lower-level RA agent...')
             self.sub_solver.load_model(pretrained_subsolver_model_path)
+        else:
+            logger.info('Randomly initializing parameters of lower-level agent!')
             
         if hasattr(self.sub_solver, 'eval'):
             self.sub_solver.eval()
@@ -118,6 +151,7 @@ class HrlAcEnv(SolutionStepRLEnv):
         self.global_timestep_count = 0
         self.global_cumulative_reward = 0
         self.actual_cumulative_reward = 0
+        self.global_moving_average_reward = 0
             
     def compute_reward(self, solution):
         r"""Calculate deserved reward according to the result of taking action."""
@@ -138,7 +172,7 @@ class HrlAcEnv(SolutionStepRLEnv):
         self.global_timestep_count += 1
         self.global_cumulative_reward += reward
         average_reward = reward - self.global_cumulative_reward / self.global_timestep_count
-        self.extra_record_info.update({
+        self.extra_info_dict.update({
             'actual_cumulative_reward': self.actual_cumulative_reward,
             'global_cumulative_reward': self.global_cumulative_reward,
             'average_reward_benchmark': self.global_cumulative_reward / self.global_timestep_count,
@@ -217,3 +251,6 @@ class HrlAcSolver(OnlineAgent, PPOSolver):
         OnlineAgent.__init__(self)
         PPOSolver.__init__(self, controller, recorder, counter, logger, config, make_policy, obs_as_tensor, **kwargs)
         self.compute_return_method = 'gae'
+        self.config.rl.gamma = 1.0
+        self.gae_lambda = 0.98
+        self.config.rl.norm_reward = True
