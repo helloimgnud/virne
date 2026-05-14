@@ -7,7 +7,7 @@ from torch_geometric.data import Batch
 #    Do NOT redefine them â that creates an incompatible parallel class.
 from virne.solver.learning.neural_network.gnn import (
     DeepEdgeFeatureGAT, GraphPooling, GraphAttentionPooling)
-from virne.solver.learning.rl_policy.net import MLPNet
+from virne.solver.learning.neural_network.mlp import MLPNet
 from virne.solver.learning.rl_policy.base_policy import BaseActorCritic, ActorCriticRegistry
 
 
