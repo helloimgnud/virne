@@ -77,10 +77,10 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         self.link_sum_attr_benchmarks = p_net_attr_benchmarks.link_sum_attr_benchmarks
         self.degree_benchmark         = max(dict(p_net.degree()).values()) or 1
 
-        # ── Running reward state (for baseline subtraction) ─────────────────
-        self.global_timestep_count       = 0
-        self.global_cumulative_reward    = 0.0
-        self.actual_cumulative_reward    = 0.0
+    # ── Running reward state (shared across all instances) ─────────────
+    global_timestep_count       = 0
+    global_cumulative_reward    = 0.0
+    actual_cumulative_reward    = 0.0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -141,17 +141,17 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
             # Early rejection
             reward = 0.0
 
-        self.actual_cumulative_reward += reward
-        self.global_timestep_count    += 1
-        self.global_cumulative_reward += reward
+        HrlAcEnvV2.actual_cumulative_reward += reward
+        HrlAcEnvV2.global_timestep_count    += 1
+        HrlAcEnvV2.global_cumulative_reward += reward
 
-        running_avg = self.global_cumulative_reward / self.global_timestep_count
+        running_avg = HrlAcEnvV2.global_cumulative_reward / HrlAcEnvV2.global_timestep_count
         baseline_reward = reward - running_avg
 
         self.extra_info_dict.update({
             'actual_reward':              reward,
-            'actual_cumulative_reward':   self.actual_cumulative_reward,
-            'global_cumulative_reward':   self.global_cumulative_reward,
+            'actual_cumulative_reward':   HrlAcEnvV2.actual_cumulative_reward,
+            'global_cumulative_reward':   HrlAcEnvV2.global_cumulative_reward,
             'average_reward_benchmark':   running_avg,
             'baseline_adjusted_reward':   baseline_reward,
         })
@@ -268,3 +268,12 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
         self.gae_lambda             = 0.98
         self.config.rl.norm_reward  = True
         self.compute_return_method  = 'gae'
+
+    def merge_instance_experience(self, instance, solution, instance_buffer, last_value):
+        """Override to ensure ALL actions (accept/reject/fail) are learned from."""
+        # The base InstanceAgent drops the experience if solution['result'] is False.
+        # But an admission control agent MUST learn from rejections and failures!
+        instance_buffer.compute_returns_and_advantages(last_value, gamma=self.config.rl.gamma, gae_lambda=self.gae_lambda, method=self.compute_advantage_method)
+        self.buffer.merge(instance_buffer)
+        self.time_step += 1
+        return self.buffer
