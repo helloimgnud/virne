@@ -16,13 +16,13 @@ v_net_size:
 arrival_rate:
   distribution: poisson
   dtype: float
-  lam: 0.04
+  lam: 0.06
   reciprocal: true
 
 lifetime:
   distribution: exponential
   dtype: float
-  scale: 500
+  scale: 1000
 
 node_attrs_setting:
   - name: cpu
@@ -31,8 +31,8 @@ node_attrs_setting:
     distribution: uniform
     dtype: int
     generative: true
-    low: 0
-    high: 20
+    low: 10
+    high: 50
 
 link_attrs_setting:
   - name: bw
@@ -41,8 +41,8 @@ link_attrs_setting:
     distribution: uniform
     dtype: int
     generative: true
-    low: 0
-    high: 50
+    low: 20
+    high: 80
 
 graph_attrs_setting:
 
