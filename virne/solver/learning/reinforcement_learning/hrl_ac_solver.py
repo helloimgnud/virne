@@ -101,12 +101,12 @@ class HrlAcEnv(SolutionStepRLEnv):
         super(HrlAcEnv, self).__init__(p_net, v_net_simulator, controller, recorder, counter, logger, config, **kwargs)
         self.action_space = spaces.Discrete(2)
         
-        sub_solver_name = config.rl.get('sub_solver_name', 'ppo_gat_seq2seq+')
+        sub_solver_name = config.solver.get('sub_solver_name', 'ppo_gat_seq2seq+')
         logger.info(f'Employing {sub_solver_name} as sub solver in HRL-AC')
         SolverClass = SolverRegistry.get_solver(sub_solver_name)
         self.sub_solver = SolverClass(controller, recorder, counter, logger, config, **kwargs)
         
-        pretrained_subsolver_model_path = config.rl.get('pretrained_subsolver_model_path', None)
+        pretrained_subsolver_model_path = config.solver.get('pretrained_subsolver_model_path', None)
         if pretrained_subsolver_model_path:
             logger.info('Loading pretrained lower-level RA agent...')
             self.sub_solver.load_model(pretrained_subsolver_model_path)
