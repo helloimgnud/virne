@@ -32,7 +32,6 @@ from virne.solver import SolverRegistry
 from virne.core.solution import Solution
 from virne.solver.learning.rl_core import InstanceAgent, PPOSolver
 from virne.solver.learning.rl_core.instance_rl_environment import SolutionStepInstanceRLEnv
-from virne.solver.learning.rl_core.online_rl_environment import SolutionStepRLEnv
 from virne.solver.learning.rl_core.policy_builder import PolicyBuilder, OptimizerBuilder
 from virne.solver.learning.neural_network.gnn import DeepEdgeFeatureGAT, GraphAttentionPooling, GraphPooling
 from virne.solver.learning.neural_network.mlp import MLPNet
@@ -488,13 +487,12 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
     When a VNR is accepted, the decision is delegated to a pre-trained or
     randomly-initialized lower-level RA (Resource Allocation) sub-solver.
 
-    Two-level environment design (critical for Virne compatibility):
-        - Env (outer):  SolutionStepRLEnv — the online simulation loop that
-          base_system.py instantiates with (p_net, v_net_simulator, ...). This
-          manages the stream of incoming VNRs across the entire simulation.
-        - InstanceEnv (inner): HrlAcEnvV2 — created per-VNR inside
-          InstanceAgent.learn_with_instance / solve. Receives a single
-          VirtualNetwork and runs the accept/reject decision.
+    Compatible with the standard Virne InstanceAgent pattern:
+        - No custom Env = ... override. The framework default (SolutionStepEnvironment)
+          is used as the outer online env, just like ppo_dual_gat+ and all other
+          InstanceAgent-based solvers.
+        - HrlAcEnvV2 is passed only to InstanceAgent.__init__() as the inner
+          per-VNR environment, which handles the accept/reject decision.
 
     Usage (config solver.name):
         solver_name: hrl_ac_v2
@@ -507,10 +505,6 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
         norm_reward = True
         lr scale    = 0.1   (via config.rl.learning_rate_scale or hardcoded)
     """
-
-    # Outer env: online simulation loop, receives (p_net, v_net_simulator, ...)
-    # base_system.py reads this attribute to create the training environment.
-    Env = SolutionStepRLEnv
 
     def __init__(self, controller, recorder, counter, logger, config, **kwargs):
         # Inner (instance-level) env — used per VNR inside learn_with_instance

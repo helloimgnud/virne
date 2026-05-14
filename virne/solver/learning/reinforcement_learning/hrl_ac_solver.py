@@ -254,10 +254,9 @@ class HrlAcEnv(SolutionStepInstanceRLEnv):
 
 @SolverRegistry.register(solver_name='hrl_ac', solver_type='r_learning')
 class HrlAcSolver(InstanceAgent, PPOSolver):
-    Env = HrlAcEnv
 
     def __init__(self, controller, recorder, counter, logger, config, **kwargs):
-        InstanceAgent.__init__(self, self.Env)
+        InstanceAgent.__init__(self, HrlAcEnv)
         PPOSolver.__init__(self, controller, recorder, counter, logger, config, make_policy, obs_as_tensor, **kwargs)
         self.compute_return_method = 'gae'
         self.config.rl.gamma = 1.0
