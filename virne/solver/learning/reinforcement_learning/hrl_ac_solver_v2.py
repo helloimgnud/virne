@@ -67,8 +67,6 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         self.action_space = spaces.Discrete(2)
 
         # Note: self.sub_solver is injected externally via env_factory in HrlAcSolverV2
-        # Note: reward baseline state (global_timestep_count / global_cumulative_reward)
-        #       is injected from the solver via env_factory so it persists across VNRs.
 
         # ── Observation benchmarks (mirroring original env.py) ─────────────
         p_net_attr_benchmarks = AttributeBenchmarkManager.get_benchmarks(
@@ -79,14 +77,10 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         self.link_sum_attr_benchmarks = p_net_attr_benchmarks.link_sum_attr_benchmarks
         self.degree_benchmark         = max(dict(p_net.degree()).values()) or 1
 
-        # ── Per-episode reward accumulator (reset each VNR) ─────────────────
-        self.actual_cumulative_reward = 0.0
-        # global_timestep_count / global_cumulative_reward are set by env_factory
-        # from the solver's persistent counters; provide safe defaults here.
-        if not hasattr(self, 'global_timestep_count'):
-            self.global_timestep_count    = 0
-        if not hasattr(self, 'global_cumulative_reward'):
-            self.global_cumulative_reward = 0.0
+        # ── Running reward state (for baseline subtraction) ─────────────────
+        self.global_timestep_count       = 0
+        self.global_cumulative_reward    = 0.0
+        self.actual_cumulative_reward    = 0.0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -141,11 +135,11 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
             reward = (w_a + w_b) * basic_reward * solution['v_net_r2c_ratio']
         elif not solution.get('early_rejection', False):
             # Accepted but sub-solver failed
+            basic_reward = self.v_net.total_resource_demand / revenue_benchmark
             reward = -0.01 * self.v_net.num_nodes
         else:
-            # Early rejection — small penalty so the agent has signal to
-            # prefer attempting (accept) over the trivial always-reject policy.
-            reward = -0.005 * self.v_net.num_nodes
+            # Early rejection
+            reward = 0.0
 
         self.actual_cumulative_reward += reward
         self.global_timestep_count    += 1
@@ -254,30 +248,10 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
         if hasattr(self.shared_sub_solver, 'eval'):
             self.shared_sub_solver.eval()
 
-        # ── Solver-level persistent reward baseline ─────────────────────────
-        # These accumulate across ALL VNRs and are injected into each env
-        # instance so the running-average baseline never resets mid-training.
-        self._global_timestep_count    = 0
-        self._global_cumulative_reward = 0.0
-
-        # 2. Use a factory to inject the shared sub-solver AND solver-level
-        #    baseline counters into each per-VNR inner environment.
-        solver_self = self  # capture for closure
-
+        # 2. Use a factory to inject the shared sub-solver into the inner environment
         def env_factory(p_net, v_net, ctrl, rec, count, log, cfg, **kw):
             env = HrlAcEnvV2(p_net, v_net, ctrl, rec, count, log, cfg, **kw)
-            env.sub_solver = solver_self.shared_sub_solver
-            # Bind solver-level counters so baseline persists across VNRs
-            env.global_timestep_count    = solver_self._global_timestep_count
-            env.global_cumulative_reward = solver_self._global_cumulative_reward
-            # After env.compute_reward() runs, sync back to the solver
-            _orig_compute_reward = env.compute_reward
-            def _patched_compute_reward():
-                r = _orig_compute_reward()
-                solver_self._global_timestep_count    = env.global_timestep_count
-                solver_self._global_cumulative_reward = env.global_cumulative_reward
-                return r
-            env.compute_reward = _patched_compute_reward
+            env.sub_solver = self.shared_sub_solver
             return env
 
         # Inner (instance-level) env — used per VNR inside learn_with_instance
@@ -294,25 +268,3 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
         self.gae_lambda             = 0.98
         self.config.rl.norm_reward  = True
         self.compute_return_method  = 'gae'
-
-    # ------------------------------------------------------------------
-    # Always merge experience — rejection data must not be discarded
-    # ------------------------------------------------------------------
-
-    def merge_instance_experience(self, instance, solution, instance_buffer, last_value):
-        """Override base class: always push experience into the buffer.
-
-        The parent's default drops trajectories when neither the agent nor
-        the baseline solver succeeded.  For the AC agent this is catastrophic
-        because every early-rejected VNR is silently thrown away, starving
-        the actor of the signal it needs to learn to accept more VNRs.
-        """
-        instance_buffer.compute_returns_and_advantages(
-            last_value,
-            gamma=self.config.rl.gamma,
-            gae_lambda=self.gae_lambda,
-            method=self.compute_advantage_method,
-        )
-        self.buffer.merge(instance_buffer)
-        self.time_step += 1
-        return self.buffer
