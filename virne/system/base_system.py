@@ -64,7 +64,8 @@ class BaseSystem:
         logger.info(f'Use {config.solver.solver_name} Solver (Type = {solver_cls.type})...\n')
         # create env and solver
         p_net, v_net_simulator = cls.load_dataset(logger, config)
-        env = SolutionStepEnvironment(p_net, v_net_simulator, controller, recorder, counter, logger, config)
+        env_cls = getattr(solver_cls, 'env_cls', SolutionStepEnvironment)
+        env = env_cls(p_net, v_net_simulator, controller, recorder, counter, logger, config)
         solver = solver_cls(controller, recorder, counter, logger, config)
 
         # Create a system

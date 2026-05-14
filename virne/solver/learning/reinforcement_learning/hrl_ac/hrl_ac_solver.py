@@ -46,7 +46,7 @@ def make_hrl_ac_policy(agent):
     return policy, optimizer
 
 
-@SolverRegistry.register(solver_name='hrl_ac', solver_type='r_learning')
+@SolverRegistry.register(solver_name='hrl_ac', solver_type='r_learning', env_cls=HrlAcOnlineEnv)
 class HrlAcSolver(OnlineAgent, PPOSolver):
     """HRL-AC: upper PPO + lower heuristic. (FIX BUG 1, 2, 13, 14)"""
 
