@@ -266,6 +266,30 @@ class TensorConvertor:
         return {**tensor_p_net_obs, **tensor_v_net_obs, **tensor_general_obs}
 
     @staticmethod
+    def obs_as_tensor_for_hrl_ac_v2(obs, device):
+        if isinstance(obs, dict):
+            p_data = get_pyg_data(obs['p_net_x'], obs['p_net_edge_index'], obs['p_net_edge_attr'])
+            v_data = get_pyg_data(obs['v_net_x'], obs['v_net_edge_index'], obs['v_net_edge_attr'])
+            return {
+                'p_net':       Batch.from_data_list([p_data]).to(device),
+                'v_net':       Batch.from_data_list([v_data]).to(device),
+                'v_net_attrs': torch.FloatTensor(np.array([obs['v_net_attrs']])).to(device),
+            }
+        elif isinstance(obs, list):
+            p_list, v_list, attrs_list = [], [], []
+            for o in obs:
+                p_list.append(get_pyg_data(o['p_net_x'], o['p_net_edge_index'], o['p_net_edge_attr']))
+                v_list.append(get_pyg_data(o['v_net_x'], o['v_net_edge_index'], o['v_net_edge_attr']))
+                attrs_list.append(o['v_net_attrs'])
+            return {
+                'p_net':       Batch.from_data_list(p_list).to(device),
+                'v_net':       Batch.from_data_list(v_list).to(device),
+                'v_net_attrs': torch.FloatTensor(np.array(attrs_list)).to(device),
+            }
+        else:
+            raise TypeError(f"obs_as_tensor_for_hrl_ac_v2: unrecognized obs type {type(obs)}")
+
+    @staticmethod
     def obs_as_tensor_for_att(obs, device):
         tensor_obs_p_net_x = TensorConvertor.p_net_x_obs_as_tensor(obs, device)
         tensor_obs_v_node_x = TensorConvertor.v_node_obs_as_tensor(obs, device)

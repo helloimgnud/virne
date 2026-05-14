@@ -5,6 +5,7 @@ import torch.nn as nn
 from virne.solver.learning.rl_policy.gnn_mlp_policy import DeepEdgeFeatureGATActorCritic
 from ..rl_policy import GcnMlpActorCritic, GatMlpActorCritic, MlpActorCritic, CnnActorCritic, AttActorCritic
 from ..rl_policy import BiGcnActorCritic, BiGatActorCritic, BiDeepEdgeFeatureGatActorCritic
+from ..rl_policy import HrlAcActorCritic
 from ..utils import get_pyg_data
 from ..obs_handler import POSITIONAL_EMBEDDING_DIM, P_NODE_STATUS_DIM, V_NODE_STATUS_DIM, V_NET_STATUS_DIM
 from virne.solver.learning.rl_core.tensor_convertor import TensorConvertor
@@ -201,7 +202,49 @@ class PolicyBuilder:
             **PolicyBuilder.get_feature_dim_config(agent.config),
             **PolicyBuilder.get_general_nn_config(agent.config),
         ).to(agent.device)
+
         optimizer = OptimizerBuilder.build_optimizer(agent.config, policy)
+        return policy, optimizer
+
+    @staticmethod
+    def build_hrl_ac_policy(agent: Any) -> Tuple[nn.Module, torch.optim.Optimizer]:
+        """Build HrlAcActorCritic and its Adam optimizer from Virne config."""
+        feature_dim_cfg = PolicyBuilder.get_feature_dim_config(agent.config)
+        nn_cfg          = PolicyBuilder.get_general_nn_config(agent.config)
+
+        # p_net: base features + 3 topological metrics (degree, closeness, etc.)
+        # v_net: base features + 1 lifetime attribute appended per-node by the env
+        p_net_feature_dim = feature_dim_cfg['p_net_x_dim'] + 3
+        p_net_edge_dim    = feature_dim_cfg['p_net_edge_dim']
+        v_net_feature_dim = feature_dim_cfg['v_net_x_dim'] + 1   # +1 for lifetime
+        v_net_edge_dim    = feature_dim_cfg['v_net_edge_dim']
+
+        policy = HrlAcActorCritic(
+            p_net_num_nodes=feature_dim_cfg['p_net_num_nodes'],
+            p_net_feature_dim=p_net_feature_dim,
+            p_net_edge_dim=p_net_edge_dim,
+            v_net_feature_dim=v_net_feature_dim,
+            v_net_edge_dim=v_net_edge_dim,
+            **nn_cfg,
+        ).to(agent.device)
+
+        # Learning-rate scale (paper uses lr/10 for HRL-AC upper agent)
+        scale = 0.1
+        if hasattr(agent.config, 'rl'):
+            rl_cfg = agent.config.rl
+            scale  = float(getattr(rl_cfg, 'learning_rate_scale', scale))
+
+        lr_cfg    = agent.config.rl.learning_rate
+        lr_actor  = float(getattr(lr_cfg, 'actor',  lr_cfg))
+        lr_critic = float(getattr(lr_cfg, 'critic', lr_cfg))
+
+        optimizer = torch.optim.Adam(
+            [
+                {'params': policy.actor.parameters(),  'lr': lr_actor  * scale},
+                {'params': policy.critic.parameters(), 'lr': lr_critic * scale},
+            ],
+            weight_decay=agent.config.rl.weight_decay,
+        )
         return policy, optimizer
 
     @staticmethod

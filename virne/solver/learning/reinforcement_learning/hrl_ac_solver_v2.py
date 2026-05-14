@@ -33,225 +33,12 @@ from virne.core.solution import Solution
 from virne.solver.learning.rl_core import InstanceAgent, PPOSolver
 from virne.solver.learning.rl_core.instance_rl_environment import SolutionStepInstanceRLEnv
 from virne.solver.learning.rl_core.policy_builder import PolicyBuilder, OptimizerBuilder
-from virne.solver.learning.neural_network.gnn import DeepEdgeFeatureGAT, GraphAttentionPooling, GraphPooling
-from virne.solver.learning.neural_network.mlp import MLPNet
+from virne.solver.learning.rl_core.tensor_convertor import TensorConvertor
 from virne.solver.learning.utils import get_pyg_data
 from virne.network import AttributeBenchmarkManager, TopologicalMetricCalculator
 
 
-# ---------------------------------------------------------------------------
-# Neural Network: Encoder / Actor / Critic / ActorCritic
-# Faithfully ported from hrl-acra-main/solver/learning/hrl_ac/net.py
-# ---------------------------------------------------------------------------
-
-class HrlAcEncoder(nn.Module):
-    """Dual-GNN encoder for physical and virtual networks.
-
-    Mirrors the released HRL-ACRA encoder (GRU modules removed for speed,
-    as noted in the original paper's open-source release).
-    """
-
-    def __init__(
-        self,
-        p_net_feature_dim: int,
-        p_net_edge_dim: int,
-        v_net_feature_dim: int,
-        v_net_edge_dim: int,
-        embedding_dim: int = 128,
-        dropout_prob: float = 0.0,
-        batch_norm: bool = False,
-    ):
-        super().__init__()
-        self.p_net_gnn = DeepEdgeFeatureGAT(
-            p_net_feature_dim, embedding_dim,
-            edge_dim=p_net_edge_dim,
-            num_layers=5,
-            dropout_prob=dropout_prob,
-            batch_norm=batch_norm,
-        )
-        self.v_net_gnn = DeepEdgeFeatureGAT(
-            v_net_feature_dim, embedding_dim,
-            edge_dim=v_net_edge_dim,
-            num_layers=3,
-            dropout_prob=dropout_prob,
-            batch_norm=batch_norm,
-        )
-        self.v_net_gap = GraphAttentionPooling(embedding_dim)
-        self.p_net_gap = GraphAttentionPooling(embedding_dim)
-        self.p_net_mean_pool = GraphPooling(aggr='mean')
-        self.v_net_mean_pool = GraphPooling(aggr='mean')
-        self.p_net_sum_pool  = GraphPooling(aggr='sum')
-        self.v_net_sum_pool  = GraphPooling(aggr='sum')
-
-    def forward(self, p_net_batch, v_net_batch):
-        # Virtual network
-        v_emb = self.v_net_gnn(v_net_batch)
-        v_gap  = self.v_net_gap(v_emb, v_net_batch.batch)
-        v_mean = self.v_net_mean_pool(v_emb, v_net_batch.batch)
-        v_sum  = self.v_net_sum_pool(v_emb, v_net_batch.batch)
-        v_global = v_gap + v_mean + v_sum
-
-        # Physical network
-        p_emb = self.p_net_gnn(p_net_batch)
-        p_gap  = self.p_net_gap(p_emb, p_net_batch.batch)
-        p_mean = self.p_net_mean_pool(p_emb, p_net_batch.batch)
-        p_sum  = self.p_net_sum_pool(p_emb, p_net_batch.batch)
-        p_global = p_gap + p_mean + p_sum
-
-        return torch.cat([p_global, v_global], dim=-1)   # (B, 2*embedding_dim)
-
-
-class HrlAcActor(nn.Module):
-    """Actor head: produces logits for 2 admission actions (accept / reject)."""
-
-    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim,
-                 v_net_feature_dim, v_net_edge_dim,
-                 embedding_dim=128, dropout_prob=0.0, batch_norm=False):
-        super().__init__()
-        self.encoder = HrlAcEncoder(
-            p_net_feature_dim, p_net_edge_dim,
-            v_net_feature_dim, v_net_edge_dim,
-            embedding_dim, dropout_prob, batch_norm,
-        )
-        self.net = MLPNet(
-            embedding_dim * 2, 2,
-            num_layers=3,
-            embedding_dims=[embedding_dim * 2, embedding_dim],
-            batch_norm=False,
-        )
-
-    def act(self, obs):
-        return self.net(self.encoder(obs['p_net'], obs['v_net']))
-
-
-class HrlAcCritic(nn.Module):
-    """Critic head: produces scalar value estimate."""
-
-    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim,
-                 v_net_feature_dim, v_net_edge_dim,
-                 embedding_dim=128, dropout_prob=0.0, batch_norm=False):
-        super().__init__()
-        self.encoder = HrlAcEncoder(
-            p_net_feature_dim, p_net_edge_dim,
-            v_net_feature_dim, v_net_edge_dim,
-            embedding_dim, dropout_prob, batch_norm,
-        )
-        self.net = MLPNet(
-            embedding_dim * 2, 1,
-            num_layers=3,
-            embedding_dims=[embedding_dim * 2, embedding_dim],
-            batch_norm=False,
-        )
-
-    def evaluate(self, obs):
-        return self.net(self.encoder(obs['p_net'], obs['v_net']))
-
-
-class HrlAcActorCritic(nn.Module):
-    """Composite policy with separate encoder weights for actor and critic."""
-
-    def __init__(self, p_net_num_nodes, p_net_feature_dim, p_net_edge_dim,
-                 v_net_feature_dim, v_net_edge_dim,
-                 embedding_dim=128, dropout_prob=0.0, batch_norm=False):
-        super().__init__()
-        kwargs = dict(
-            p_net_num_nodes=p_net_num_nodes,
-            p_net_feature_dim=p_net_feature_dim,
-            p_net_edge_dim=p_net_edge_dim,
-            v_net_feature_dim=v_net_feature_dim,
-            v_net_edge_dim=v_net_edge_dim,
-            embedding_dim=embedding_dim,
-            dropout_prob=dropout_prob,
-            batch_norm=batch_norm,
-        )
-        self.actor  = HrlAcActor(**kwargs)
-        self.critic = HrlAcCritic(**kwargs)
-
-    def act(self, obs):
-        return self.actor.act(obs)
-
-    def evaluate(self, obs):
-        return self.critic.evaluate(obs)
-
-
-# ---------------------------------------------------------------------------
-# Policy factory — called by PPOSolver.__init__ via the policy_builder arg
-# ---------------------------------------------------------------------------
-
-def make_policy_v2(agent, **kwargs):
-    """Build HrlAcActorCritic and its Adam optimizer from Virne config."""
-    feature_dim_cfg = PolicyBuilder.get_feature_dim_config(agent.config)
-    nn_cfg          = PolicyBuilder.get_general_nn_config(agent.config)
-
-    # p_net: base features + 3 topological metrics (degree, closeness, etc.)
-    # v_net: base features + 1 lifetime attribute appended per-node by the env
-    p_net_feature_dim = feature_dim_cfg['p_net_x_dim'] + 3
-    p_net_edge_dim    = feature_dim_cfg['p_net_edge_dim']
-    v_net_feature_dim = feature_dim_cfg['v_net_x_dim'] + 1   # +1 for lifetime
-    v_net_edge_dim    = feature_dim_cfg['v_net_edge_dim']
-
-    policy = HrlAcActorCritic(
-        p_net_num_nodes=feature_dim_cfg['p_net_num_nodes'],
-        p_net_feature_dim=p_net_feature_dim,
-        p_net_edge_dim=p_net_edge_dim,
-        v_net_feature_dim=v_net_feature_dim,
-        v_net_edge_dim=v_net_edge_dim,
-        **nn_cfg,
-    ).to(agent.device)
-
-    # Learning-rate scale (paper uses lr/10 for HRL-AC upper agent)
-    scale = 0.1
-    if hasattr(agent.config, 'rl'):
-        rl_cfg = agent.config.rl
-        scale  = float(getattr(rl_cfg, 'learning_rate_scale', scale))
-
-    lr_cfg    = agent.config.rl.learning_rate
-    lr_actor  = float(getattr(lr_cfg, 'actor',  lr_cfg))
-    lr_critic = float(getattr(lr_cfg, 'critic', lr_cfg))
-
-    optimizer = torch.optim.Adam(
-        [
-            {'params': policy.actor.parameters(),  'lr': lr_actor  * scale},
-            {'params': policy.critic.parameters(), 'lr': lr_critic * scale},
-        ],
-        weight_decay=agent.config.rl.weight_decay,
-    )
-    return policy, optimizer
-
-
-# ---------------------------------------------------------------------------
-# obs_as_tensor: converts raw observation dict → batched PyG tensors
-# ---------------------------------------------------------------------------
-
-def obs_as_tensor_v2(obs, device):
-    """Convert a raw observation (dict or list of dicts) to tensor dict.
-
-    Expected keys in each obs dict:
-        p_net_x, p_net_edge_index, p_net_edge_attr
-        v_net_x, v_net_edge_index, v_net_edge_attr
-        v_net_attrs   (scalar array, e.g. [norm_lifetime])
-    """
-    if isinstance(obs, dict):
-        p_data = get_pyg_data(obs['p_net_x'], obs['p_net_edge_index'], obs['p_net_edge_attr'])
-        v_data = get_pyg_data(obs['v_net_x'], obs['v_net_edge_index'], obs['v_net_edge_attr'])
-        return {
-            'p_net':       Batch.from_data_list([p_data]).to(device),
-            'v_net':       Batch.from_data_list([v_data]).to(device),
-            'v_net_attrs': torch.FloatTensor(np.array([obs['v_net_attrs']])).to(device),
-        }
-    elif isinstance(obs, list):
-        p_list, v_list, attrs_list = [], [], []
-        for o in obs:
-            p_list.append(get_pyg_data(o['p_net_x'], o['p_net_edge_index'], o['p_net_edge_attr']))
-            v_list.append(get_pyg_data(o['v_net_x'], o['v_net_edge_index'], o['v_net_edge_attr']))
-            attrs_list.append(o['v_net_attrs'])
-        return {
-            'p_net':       Batch.from_data_list(p_list).to(device),
-            'v_net':       Batch.from_data_list(v_list).to(device),
-            'v_net_attrs': torch.FloatTensor(np.array(attrs_list)).to(device),
-        }
-    else:
-        raise TypeError(f"obs_as_tensor_v2: unrecognized obs type {type(obs)}")
+obs_as_tensor_v2 = TensorConvertor.obs_as_tensor_for_hrl_ac_v2
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +67,13 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         sub_solver_name = self._get_cfg(config.solver, 'sub_solver_name', 'ppo_gat_seq2seq+')
         logger.info(f'[HrlAcEnvV2] Using sub-solver: {sub_solver_name}')
 
-        if not SolverRegistry.has_solver(sub_solver_name):
+        try:
+            SubSolverClass = SolverRegistry.get(sub_solver_name)
+        except NotImplementedError:
             raise NotImplementedError(
                 f'Sub-solver "{sub_solver_name}" is not registered in SolverRegistry. '
                 f'Make sure it is imported before HrlAcSolverV2 is instantiated.'
             )
-        SubSolverClass = SolverRegistry.get_solver(sub_solver_name)
         self.sub_solver = SubSolverClass(controller, recorder, counter, logger, config, **kwargs)
 
         pretrained_path = self._get_cfg(config.solver, 'pretrained_subsolver_model_path', None)
@@ -512,7 +300,7 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
         PPOSolver.__init__(
             self,
             controller, recorder, counter, logger, config,
-            make_policy_v2,
+            PolicyBuilder.build_hrl_ac_policy,
             obs_as_tensor_v2,
             **kwargs,
         )
