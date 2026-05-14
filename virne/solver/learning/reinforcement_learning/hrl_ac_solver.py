@@ -46,16 +46,16 @@ class ActorCritic(nn.Module):
         super(ActorCritic, self).__init__()
         self.encoder = Encoder(p_net_feature_dim, p_net_edge_dim, v_net_feature_dim, v_net_edge_dim, embedding_dim)
         embedding_dims = [embedding_dim*2, embedding_dim]
-        self.mlp = MLPNet(embedding_dim*2, 2, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
-        self.critic_mlp = MLPNet(embedding_dim*2, 1, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
+        self.actor = MLPNet(embedding_dim*2, 2, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
+        self.critic = MLPNet(embedding_dim*2, 1, num_layers=3, embedding_dims=embedding_dims, batch_norm=False)
 
     def act(self, obs):
         features = self.encoder(obs['p_net'], obs['v_net'])
-        return self.mlp(features)
+        return self.actor(features)
         
     def evaluate(self, obs):
         features = self.encoder(obs['p_net'], obs['v_net'])
-        return self.critic_mlp(features)
+        return self.critic(features)
 
 def make_policy(agent, **kwargs):
     feature_dim_config = PolicyBuilder.get_feature_dim_config(agent.config)
