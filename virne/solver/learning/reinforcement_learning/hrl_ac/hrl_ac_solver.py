@@ -5,7 +5,7 @@ from torch_geometric.data import Data, Batch
 from virne.solver.learning.rl_core.online_agent import OnlineAgent
 from virne.solver.learning.rl_core.rl_solver import PPOSolver
 from virne.solver.learning.rl_core.policy_builder import OptimizerBuilder, PolicyBuilder
-from virne.solver.registry import SolverRegistry
+from virne.solver import SolverRegistry
 from virne.solver.learning.rl_policy.hrl_ac_policy import HrlAcActorCritic
 from virne.solver.learning.rl_core.feature_constructor import HrlAcFeatureConstructor
 from .hrl_ac_env import HrlAcOnlineEnv
