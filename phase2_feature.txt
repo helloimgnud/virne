@@ -1,0 +1,29 @@
+@FeatureConstructorRegistry.register('hrl_ac')
+class HrlAcFeatureConstructor(BaseFeatureConstructor):
+    """
+    Passthrough stub for HRL-AC solver.
+    Actual feature construction happens in HrlAcOnlineEnv.get_observation().
+    This registration exists so config-driven code can reference 'hrl_ac' by name.
+
+    get_observation() is intentionally NOT overridden â call sites that
+    try to invoke it directly will get a clear error. Do NOT call this
+    through the registry hot-path.
+    """
+
+    @staticmethod
+    def get_p_net_feature_dim(config) -> int:
+        """
+        p_net node feature dim = num_node_resource_attrs + 1 (degree)
+                                 + num_link_resource_attrs * 2 (max + sum)
+        Default CPU+BW: 1 + 1 + 1 + 1 = 4
+        """
+        num_node_res = config.rl.feature_constructor.get(
+            'num_extracted_p_node_attrs', 1)
+        num_link_res = config.rl.feature_constructor.get(
+            'num_extracted_p_link_attrs', 1)
+        return num_node_res + 1 + num_link_res * 2
+
+    @staticmethod
+    def get_v_net_feature_dim(config) -> int:
+        """Same as p_net PLUS the lifetime scalar broadcast: dim = p_dim + 1"""
+        return HrlAcFeatureConstructor.get_p_net_feature_dim(config) + 1

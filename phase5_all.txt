@@ -1,0 +1,89 @@
+: Registration & Config
+
+### 8.1 `hrl_ac/__init__.py`
+```python
+from .hrl_ac_solver import HrlAcSolver
+from .hrl_ac_env import HrlAcOnlineEnv
+__all__ = ['HrlAcSolver', 'HrlAcOnlineEnv']
+```
+
+### 8.2 Update parent `__init__.py` files
+```python
+# reinforcement_learning/__init__.py
+from .hrl_ac import HrlAcSolver, HrlAcOnlineEnv
+# rl_policy/__init__.py
+from .hrl_ac_policy import HrlAcActorCritic
+```
+
+### 8.3 `virne/conf/solver/hrl_ac.yaml`
+```yaml
+# @package _global_
+# FIX BUG 7: no duplicate keys.
+# FIX BUG 4: p_net count via config.simulation.p_net_setting_num_nodes.
+# FIX BUG 8: network params under config.nn.
+defaults:
+  - _self_
+solver:
+  solver_name: hrl_ac
+  solver_type: r_learning
+  sub_solver_name: nrm_rank
+  node_ranking_method: order
+  link_ranking_method: order
+  matching_mathod: greedy
+  shortest_method: k_shortest
+  k_shortest: 10
+nn:
+  embedding_dim: 128   # FIX BUG 7: single occurrence
+  dropout_prob: 0.0
+  batch_norm: false
+rl:
+  gamma: 1.0           # FIX BUG 13: also patched at runtime
+  gae_lambda: 0.98
+  eps_clip: 0.2
+  if_use_baseline_solver: false
+  if_allow_baseline_unsafe_solve: false
+  baselin_solver_name: grc
+  norm_reward: false
+  norm_advantage: true
+  clip_grad: true
+  max_grad_norm: 1.0
+  target_kl: null
+  weight_decay: 0.0
+  mask_actions: false
+  maskable_policy: false
+  coef_critic_loss: 0.5
+  coef_entropy_loss: 0.01
+  coef_mask_loss: 0.0
+  target_steps: 128
+  # FIX (OptimizerBuilder): child names 'actor'/'critic' must match policy.named_children()
+  learning_rate:
+    actor: 0.0001
+    critic: 0.00001   # actor/10  matches hrl_ac original
+  feature_constructor:
+    num_extracted_p_node_attrs: 1
+    num_extracted_p_link_attrs: 1
+    num_extracted_v_node_attrs: 1
+    num_extracted_v_link_attrs: 1
+    if_use_node_status_flags: false
+    if_use_aggregated_link_attrs: false
+    if_use_degree_metric: false
+    if_use_more_topological_metrics: false
+training:
+  num_epochs: 300
+  batch_size: 128
+  use_cuda: true
+  gpu_id: 0
+  num_workers: 1
+  distributed_training: false
+  save_interval: 50
+  eval_interval: 25
+  log_interval: 10
+  model_dir_name: model
+  best_model_dir_name: best_model
+inference:
+  decode_strategy: greedy
+  k_searching: 1
+```
+
+---
+

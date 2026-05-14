@@ -285,6 +285,27 @@ class PNetVNetFeatureConstructor(BaseFeatureConstructor):
         return combined_obs
 
 
+@FeatureConstructorRegistry.register('hrl_ac')
+class HrlAcFeatureConstructor(BaseFeatureConstructor):
+    """
+    Passthrough stub for HRL-AC solver.
+    Actual feature construction happens in HrlAcOnlineEnv.get_observation().
+    This registration exists so config-driven code can reference 'hrl_ac' by name.
+    """
+
+    @staticmethod
+    def get_p_net_feature_dim(config) -> int:
+        num_node_res = config.rl.feature_constructor.get(
+            'num_extracted_p_node_attrs', 1)
+        num_link_res = config.rl.feature_constructor.get(
+            'num_extracted_p_link_attrs', 1)
+        return num_node_res + 1 + num_link_res * 2
+
+    @staticmethod
+    def get_v_net_feature_dim(config) -> int:
+        return HrlAcFeatureConstructor.get_p_net_feature_dim(config) + 1
+
+
 def get_selected_p_net_nodes(solution):
     """
     Get the selected physical network nodes based on the solution.
