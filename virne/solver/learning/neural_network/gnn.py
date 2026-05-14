@@ -223,7 +223,8 @@ class DeepEdgeFeatureGAT(nn.Module):
             conv = GATConv(embedding_dim, embedding_dim, heads=num_heads, edge_dim=edge_dim)
             norm = nn.BatchNorm1d(embedding_dim) if batch_norm else nn.Identity()
             dout = nn.Dropout(dropout_prob) if dropout_prob < 1. else nn.Identity()
-            weight = nn.Parameter(torch.Tensor(embedding_dim, embedding_dim))
+            weight = nn.Parameter(torch.empty(embedding_dim, embedding_dim))
+            nn.init.orthogonal_(weight)  # FIX: initialize weight to prevent NaN
             self.add_module('conv_{}'.format(layer_id), conv)
             self.add_module('norm_{}'.format(layer_id), norm)
             self.add_module('dout_{}'.format(layer_id), dout)
