@@ -4,7 +4,6 @@
 
 
 import os
-from sympy import im
 import tqdm
 import pprint
 import random
@@ -48,6 +47,7 @@ class BaseSystem:
         self.counter = counter
         self.logger = logger
         self.config = config
+        self.pbar = None  # initialized here; set properly by get_process_bar()
 
     @classmethod
     def from_config(cls, config):
@@ -149,8 +149,9 @@ class BaseSystem:
     def update_process_bar(self, info):
         if self.pbar is not None: 
             self.pbar.update(1)
+            v_net_count = info.get("v_net_count", 0)
             self.pbar.set_postfix({
-                'ac': f'{info["success_count"] / info["v_net_count"]:1.2f}',
+                'ac': f'{info["success_count"] / v_net_count:1.2f}' if v_net_count > 0 else 'n/a',
                 'r2c': f'{info["long_term_r2c_ratio"]:1.2f}',
                 'inservice': f'{info["inservice_count"]:05d}',
             })
@@ -402,18 +403,22 @@ class TimeWindowSystem(BaseSystem):
             v_net_id = event['v_net_id']
             v_net    = self.env.v_net_simulator.v_nets[v_net_id]
 
-            self.env.v_net = v_net
-            self.env.recorder.update_state({
-                'event_id': event['id'],
-                'event_type': 0,
-                'event_time': event['time'],
-            })
-
+            # get_record returns a dict, e.g. {'result': True, 'node_slots': ..., ...}
+            # KeyError is raised (not None) when the VNR has no record yet.
+            # This happens when a VNR's arrival and departure both fall inside
+            # the same time window: the departure is processed here (step ②)
+            # before the arrival has been recorded in steps ③–⑤.
+            # In that case there is nothing to release — the VNR was never
+            # embedded — so we treat it exactly like a rejected VNR.
             try:
-                # get_record returns a dict, e.g. {'result': True, 'node_slots': ..., ...}
                 record = self.recorder.get_record(v_net_id=v_net_id)
             except KeyError:
-                continue
+                record = None
+                self.logger.debug(
+                    f'  [release] VNR {v_net_id} has no record '
+                    f'(same-window arrival + departure, never embedded); '
+                    f'nothing to release'
+                )
 
             # BUG 2 FIX: read the dict key, not a .result attribute
             if record is not None and record.get('result', False):
@@ -421,20 +426,10 @@ class TimeWindowSystem(BaseSystem):
                 # knows which nodes/links to free.
                 solution = Solution.from_record(record, v_net)
                 self.controller.release(v_net, self.env.p_net, solution)
-                
-                self.env.solution = solution
-                self.env.solution['description'] = 'Leave Event'
-                self.env.count_and_add_record()
-
                 self.logger.debug(
                     f'  [release] VNR {v_net_id} → resources returned to p_net'
                 )
             else:
-                self.env.solution = Solution.from_v_net(v_net)
-                self.env.solution.result = False
-                self.env.solution['description'] = 'Leave Event (Not Accepted)'
-                self.env.count_and_add_record()
-
                 self.logger.debug(
                     f'  [release] VNR {v_net_id} departed but was never accepted; '
                     f'nothing to release'
@@ -512,57 +507,38 @@ class TimeWindowSystem(BaseSystem):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _is_solution_feasible(self, v_net, solution: Solution) -> bool:
-        """
-        Verify that *solution* is still deployable on the current p_net.
-
-        The solver produced all solutions against a single snapshot of p_net.
-        By the time we get here, earlier VNRs in the same batch may have
-        already consumed resources, invalidating some solutions.
-
-        This method checks node and link capacity constraints against the
-        *live* p_net (which reflects all deployments committed so far in
-        this batch).
-
-        BUG 1 FIX: without this check, solutions produced against the old
-        snapshot can be infeasible when applied sequentially.
-
-        Args:
-            v_net    : the VirtualNetwork being embedded
-            solution : Solution returned by the solver
-
-        Returns:
-            True  if every node/link placement in solution still has
-                  sufficient remaining capacity on p_net
-            False otherwise
-        """
         p_net = self.env.p_net
 
-        # Check node placements
-        node_slots = solution.node_slots  # {v_node: p_node}
-        for v_node, p_node in node_slots.items():
-            # Compare required vs remaining capacity for each resource attribute
+        # ── Node placements ──────────────────────────────────────────────────────
+        for v_node, p_node in solution.node_slots.items():
             for attr in v_net.get_node_attrs(types=['resource']):
-                required  = attr.get_data(v_net)[v_node]
-                available = attr.get_data(p_net)[p_node]
+                # Use the networkx node-attribute dict directly (correct for any ID type)
+                required  = v_net.nodes[v_node].get(attr.name, 0)
+                available = p_net.nodes[p_node].get(attr.name, 0)
                 if required > available:
                     self.logger.debug(
-                        f'  [feasibility] VNR {v_net.id}: node attr "{attr.name}" '
-                        f'v_node={v_node} → p_node={p_node}: '
-                        f'need {required}, have {available}'
+                        f'  [feasibility] VNR {v_net.id}: node "{attr.name}" '
+                        f'v={v_node}→p={p_node}: need {required}, have {available}'
                     )
                     return False
 
-        # Check link placements
-        link_paths = solution.link_paths  # {(u,v): [p_node, ...]}
-        for (v_u, v_v), path in link_paths.items():
+        # ── Link placements ──────────────────────────────────────────────────────
+        for (v_u, v_v), path in solution.link_paths.items():
             for attr in v_net.get_link_attrs(types=['resource']):
-                required = attr.get_data(v_net)[v_u, v_v]
+                required = v_net[v_u][v_v].get(attr.name, 0)
                 for i in range(len(path) - 1):
                     p_u, p_v = path[i], path[i + 1]
-                    available = attr.get_data(p_net)[p_u, p_v]
+                    if not p_net.has_edge(p_u, p_v):          # guard: edge missing
+                        self.logger.debug(
+                            f'  [feasibility] VNR {v_net.id}: link "{attr.name}" '
+                            f'({v_u},{v_v}) hop ({p_u},{p_v}): edge missing'
+                        )
+                        return False
+                    # .edges[u,v] works for both Graph and MultiGraph (key=0 default)
+                    available = p_net.edges[p_u, p_v].get(attr.name, 0)
                     if required > available:
                         self.logger.debug(
-                            f'  [feasibility] VNR {v_net.id}: link attr "{attr.name}" '
+                            f'  [feasibility] VNR {v_net.id}: link "{attr.name}" '
                             f'({v_u},{v_v}) hop ({p_u},{p_v}): '
                             f'need {required}, have {available}'
                         )
@@ -573,40 +549,6 @@ class TimeWindowSystem(BaseSystem):
     def _apply_batch_results(self, instances: list, solutions: list):
         """
         Commit every (instance, solution) pair to the environment in order.
-
-        BUG 1 FIX — feasibility re-check:
-        ───────────────────────────────────
-        The solver computed all solutions against a *single* snapshot of p_net.
-        When we apply them sequentially, each accepted VNR consumes resources,
-        potentially making a later solution in the same batch infeasible.
-
-        Before each env.step() we therefore call _is_solution_feasible().
-        If an accepted solution is no longer feasible, we force-reject it
-        (set solution.result = False) and log a warning.  This ensures the
-        system never commits an embedding that violates physical-network
-        capacity constraints.
-
-        BUG 3 FIX — env.step() cursor:
-        ────────────────────────────────
-        env.step() was designed for one-VNR-at-a-time online processing: each
-        call also advances the environment's internal event pointer to the next
-        arrival.  In batch mode our manual current_event_id pointer already
-        handles event sequencing; having env.step() advance its own pointer
-        independently causes the two to diverge and can trigger double-release
-        of departed VNRs.
-
-        We therefore call controller.deploy() / recorder.add_record() /
-        counter.count() directly, bypassing env.step()'s cursor advance.
-        The environment's progress tracking is updated via env.transit_obs()
-        which moves the observation without touching the event pointer.
-
-        Args:
-            instances (list[dict])    : batch instances (for logging/context)
-            solutions (list[Solution]): solver output, same order as instances
-
-        Returns:
-            last_info (dict): counter info dict after the last VNR in the batch
-            all_done  (bool): True once all VNRs in the simulator are processed
         """
         last_info = {}
         all_done  = False
@@ -616,7 +558,7 @@ class TimeWindowSystem(BaseSystem):
             v_net    = instance['v_net']
             v_net_id = instance['event']['v_net_id']
 
-            # ── BUG 1 FIX: feasibility re-check ──────────────────────────────
+            # ── Feasibility re-check ─────────────────────────────────────────────
             if solution.result:
                 if not self._is_solution_feasible(v_net, solution):
                     self.logger.warning(
@@ -629,23 +571,26 @@ class TimeWindowSystem(BaseSystem):
             status = 'ACCEPTED' if solution.result else 'REJECTED'
             self.logger.debug(f'  [apply] VNR {v_net_id}: {status}')
 
-            # ── BUG 3 FIX: bypass env.step() to avoid cursor drift ───────────
-            # Deploy or skip, then record and count directly.
+            # ── Deploy ───────────────────────────────────────────────────────────
             if solution.result:
                 self.controller.deploy(v_net, p_net, solution)
 
-            self.env.v_net = v_net
-            self.env.solution = solution
-            self.env.recorder.update_state({
-                'event_id': instance['event']['id'],
-                'event_type': 1,
+            # ── FIX F: tell the recorder which event we are processing ───────────
+            # recorder.count_state() reads event_type/event_id from recorder.state
+            # to decide if this is an arrival (type=1) or departure (type=0).
+            # In TimeWindowSystem we bypass env.ready(), so we must set it manually.
+            self.recorder.update_state({
+                'event_id':   instance['event']['id'],
+                'event_type': instance['event']['type'],   # 1 = arrival
                 'event_time': instance['event']['time'],
             })
-            last_info = self.env.count_and_add_record()
 
-            # Check if the simulator has exhausted all events.  We derive
-            # all_done from the counter rather than env.step()'s done signal so
-            # we stay decoupled from env's internal pointer.
+            # ── FIX A + B: use recorder.count() → add_record() pipeline ─────────
+            # recorder.count() calls counter.count_solution() AND count_state(),
+            # then returns the merged record dict.  add_record() stores it.
+            record    = self.recorder.count(v_net, p_net, solution)
+            last_info = self.recorder.add_record(record)
+
             if last_info.get('v_net_count', 0) >= self.env.v_net_simulator.num_v_nets:
                 all_done = True
 
@@ -709,16 +654,11 @@ class TimeWindowSystem(BaseSystem):
                     events_list, current_event_id, window_end
                 )
 
-                arrivals_ids = {event['v_net_id'] for event in arrivals}
-                departures_prev = [dev for dev in departures if dev['v_net_id'] not in arrivals_ids]
-                departures_curr = [dev for dev in departures if dev['v_net_id'] in arrivals_ids]
-
                 # ② Release departed VNRs FIRST so the solver sees
                 #    up-to-date available capacity on p_net.
-                self._release_departed_vnrs(departures_prev)
+                self._release_departed_vnrs(departures)
 
                 if not arrivals:
-                    self._release_departed_vnrs(departures_curr)
                     continue
 
                 # ③ Wrap each arriving VNR into a solver-ready instance dict.
@@ -729,9 +669,6 @@ class TimeWindowSystem(BaseSystem):
 
                 # ⑤ Re-check feasibility, then commit every result.
                 last_info, all_done = self._apply_batch_results(instances, solutions)
-
-                # ⑥ Release departed VNRs END
-                self._release_departed_vnrs(departures_curr)
 
                 self.update_process_bar(last_info)
 
