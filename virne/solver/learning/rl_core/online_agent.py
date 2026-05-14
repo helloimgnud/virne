@@ -39,7 +39,7 @@ class OnlineAgent(object):
                     # if self.config.rl.norm_reward:
                         # self.running_stats.update(self.buffer.rewards)
                         # self.buffer.rewards = ((np.array(self.buffer.rewards) - self.running_stats.mean) / (np.sqrt(self.running_stats.var + 1e-9))).tolist()
-                    self.buffer.compute_returns_and_advantages(last_value, gamma=self.config.rl.gamma, gae_lambda=self.gae_lambda, method=self.compute_return_method)
+                    self.buffer.compute_returns_and_advantages(last_value, gamma=self.config.rl.gamma, gae_lambda=self.gae_lambda, method=self.compute_advantage_method)
                     loss = self.update()
             print(f'\nepoch {epoch_id:4d}, success_count {success_count:5d}, r2c {info["long_term_r2c_ratio"]:1.4f}, {self.running_stats.mean}-{np.sqrt(self.running_stats.var)}')
             if self.rank == 0:
