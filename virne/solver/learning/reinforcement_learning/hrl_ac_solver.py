@@ -247,6 +247,8 @@ class HrlAcEnv(SolutionStepRLEnv):
 
 @SolverRegistry.register(solver_name='hrl_ac', solver_type='r_learning')
 class HrlAcSolver(OnlineAgent, PPOSolver):
+    Env = HrlAcEnv
+
     def __init__(self, controller, recorder, counter, logger, config, **kwargs):
         OnlineAgent.__init__(self)
         PPOSolver.__init__(self, controller, recorder, counter, logger, config, make_policy, obs_as_tensor, **kwargs)

@@ -1,6 +1,6 @@
 # os.chdir(os.path.join(os.getcwd(), 'code/virne-dev'))
 import os
-
+os.environ['HYDRA_FULL_ERROR'] = '1'
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 from virne.system import BaseSystem
