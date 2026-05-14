@@ -101,6 +101,7 @@ class SolverRegistry:
             if solver_name in cls._registry:
                 raise ValueError(f"Solver '{solver_name}' is already registered.")
             setattr(handler_cls, 'type', solver_type)
+            setattr(handler_cls, 'env_cls', env_cls)
             cls._registry[solver_name] = handler_cls
             return handler_cls
         return decorator
