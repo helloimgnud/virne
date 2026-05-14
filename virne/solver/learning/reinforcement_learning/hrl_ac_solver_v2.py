@@ -66,28 +66,7 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         # Override to binary action space
         self.action_space = spaces.Discrete(2)
 
-        # ── Sub-solver (lower-level RA agent) ──────────────────────────────
-        sub_solver_name = self._get_cfg(config.solver, 'sub_solver_name', 'ppo_gat_seq2seq+')
-        logger.info(f'[HrlAcEnvV2] Using sub-solver: {sub_solver_name}')
-
-        try:
-            SubSolverClass = SolverRegistry.get(sub_solver_name)
-        except NotImplementedError:
-            raise NotImplementedError(
-                f'Sub-solver "{sub_solver_name}" is not registered in SolverRegistry. '
-                f'Make sure it is imported before HrlAcSolverV2 is instantiated.'
-            )
-        self.sub_solver = SubSolverClass(controller, recorder, counter, logger, config, **kwargs)
-
-        pretrained_path = self._get_cfg(config.solver, 'pretrained_subsolver_model_path', None)
-        if pretrained_path:
-            logger.info(f'[HrlAcEnvV2] Loading pretrained sub-solver from {pretrained_path}')
-            self.sub_solver.load_model(pretrained_path)
-        else:
-            logger.info('[HrlAcEnvV2] Sub-solver randomly initialized.')
-
-        if hasattr(self.sub_solver, 'eval'):
-            self.sub_solver.eval()
+        # Note: self.sub_solver is injected externally via env_factory in HrlAcSolverV2
 
         # ── Observation benchmarks (mirroring original env.py) ─────────────
         p_net_attr_benchmarks = AttributeBenchmarkManager.get_benchmarks(
@@ -253,8 +232,30 @@ class HrlAcSolverV2(InstanceAgent, PPOSolver):
     """
 
     def __init__(self, controller, recorder, counter, logger, config, **kwargs):
+        # 1. Instantiate the sub-solver ONCE to avoid recreating RL models per VNR
+        sub_solver_name = config.solver.get('sub_solver_name', 'ppo_gat_seq2seq+') if hasattr(config.solver, 'get') else getattr(config.solver, 'sub_solver_name', 'ppo_gat_seq2seq+')
+        logger.info(f'[HrlAcSolverV2] Instantiating shared sub-solver: {sub_solver_name}')
+        SubSolverClass = SolverRegistry.get(sub_solver_name)
+        self.shared_sub_solver = SubSolverClass(controller, recorder, counter, logger, config, **kwargs)
+
+        pretrained_path = config.solver.get('pretrained_subsolver_model_path', None) if hasattr(config.solver, 'get') else getattr(config.solver, 'pretrained_subsolver_model_path', None)
+        if pretrained_path:
+            logger.info(f'[HrlAcSolverV2] Loading pretrained sub-solver from {pretrained_path}')
+            self.shared_sub_solver.load_model(pretrained_path)
+        else:
+            logger.info('[HrlAcSolverV2] Shared sub-solver randomly initialized.')
+
+        if hasattr(self.shared_sub_solver, 'eval'):
+            self.shared_sub_solver.eval()
+
+        # 2. Use a factory to inject the shared sub-solver into the inner environment
+        def env_factory(p_net, v_net, ctrl, rec, count, log, cfg, **kw):
+            env = HrlAcEnvV2(p_net, v_net, ctrl, rec, count, log, cfg, **kw)
+            env.sub_solver = self.shared_sub_solver
+            return env
+
         # Inner (instance-level) env — used per VNR inside learn_with_instance
-        InstanceAgent.__init__(self, HrlAcEnvV2)
+        InstanceAgent.__init__(self, env_factory)
         PPOSolver.__init__(
             self,
             controller, recorder, counter, logger, config,
