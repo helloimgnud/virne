@@ -212,16 +212,10 @@ class PolicyBuilder:
         feature_dim_cfg = PolicyBuilder.get_feature_dim_config(agent.config)
         nn_cfg          = PolicyBuilder.get_general_nn_config(agent.config)
 
-        # HrlAcEnv specifically extracts: base node resource + degree + max link + sum link
-        num_p_node_attrs = agent.config.rl.feature_constructor.num_extracted_p_node_attrs
-        num_p_link_attrs = agent.config.rl.feature_constructor.num_extracted_p_link_attrs
-        num_v_node_attrs = agent.config.rl.feature_constructor.num_extracted_v_node_attrs
-        num_v_link_attrs = agent.config.rl.feature_constructor.num_extracted_v_link_attrs
-
-        p_net_feature_dim = num_p_node_attrs + 1 + num_p_link_attrs + num_p_link_attrs
-        v_net_feature_dim = num_v_node_attrs + 1 + num_v_link_attrs + num_v_link_attrs + 1 # +1 for lifetime
-        p_net_edge_dim    = num_p_link_attrs
-        v_net_edge_dim    = num_v_link_attrs
+        p_net_feature_dim = feature_dim_cfg['p_net_x_dim']
+        v_net_feature_dim = feature_dim_cfg['v_net_x_dim'] + 1   # +1 for lifetime
+        p_net_edge_dim    = feature_dim_cfg['p_net_edge_dim']
+        v_net_edge_dim    = feature_dim_cfg['v_net_edge_dim']
 
         policy = HrlAcActorCritic(
             p_net_num_nodes=feature_dim_cfg['p_net_num_nodes'],

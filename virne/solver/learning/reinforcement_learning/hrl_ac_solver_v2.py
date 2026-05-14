@@ -58,6 +58,9 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
     """
 
     def __init__(self, p_net, v_net, controller, recorder, counter, logger, config, **kwargs):
+        from omegaconf import open_dict
+        with open_dict(config):
+            config.rl.feature_constructor.name = 'p_net_v_net'
         super().__init__(p_net, v_net, controller, recorder, counter, logger, config, **kwargs)
 
         # Override to binary action space
@@ -183,71 +186,26 @@ class HrlAcEnvV2(SolutionStepInstanceRLEnv):
         return baseline_reward
 
     def get_observation(self):
-        """Build dual-graph observation dict.
+        """Build dual-graph observation dict using Virne's standard FeatureConstructor."""
+        # 1. Get the rich 13-dimension observation from Virne's standard FeatureConstructor
+        obs = self.feature_constructor.construct(self.p_net, self.v_net, self.solution, curr_v_node_id=0)
+        
+        # 2. Get the VNR's normalized lifetime
+        v_attrs = self._get_v_net_attrs_obs()
 
-        Structure mirrors hrl-acra-main/solver/learning/hrl_ac/env.py:
-            - p_net: node features = [resource, degree, link_max, link_sum]
-            - v_net: node features = [resource, degree, link_max, link_sum]
-              then v_net_attrs (norm lifetime) is appended per-node.
-        """
-        p_obs     = self._get_p_net_obs()
-        v_obs     = self._get_v_net_obs()
-        v_attrs   = self._get_v_net_attrs_obs()
+        # 3. Append the lifetime to the virtual nodes
+        padding   = np.expand_dims(v_attrs, 0).repeat(obs['v_net_x'].shape[0], axis=0)
+        obs['v_net_x'] = np.concatenate((obs['v_net_x'], padding), axis=-1).astype(np.float32)
+        obs['v_net_attrs'] = v_attrs
 
-        # Append per-node lifetime attribute to every v-node row
-        padding   = np.expand_dims(v_attrs, 0).repeat(v_obs['x'].shape[0], axis=0)
-        v_obs['x'] = np.concatenate((v_obs['x'], padding), axis=-1).astype(np.float32)
-
-        return {
-            'p_net_x':          p_obs['x'],
-            'p_net_edge_index': p_obs['edge_index'],
-            'p_net_edge_attr':  p_obs['edge_attr'],
-            'v_net_attrs':      v_attrs,
-            'v_net_x':          v_obs['x'],
-            'v_net_edge_index': v_obs['edge_index'],
-            'v_net_edge_attr':  v_obs['edge_attr'],
-        }
+        return obs
 
     def generate_action_mask(self):
         return np.ones(2, dtype=bool)
 
     # ------------------------------------------------------------------
-    # Private observation helpers (port of original env.py)
+    # Private observation helpers
     # ------------------------------------------------------------------
-
-    def _get_p_net_obs(self):
-        oh = self.obs_handler
-        node_data  = oh.get_node_attrs_obs(self.p_net, node_attr_types=['resource'],
-                                           node_attr_benchmarks=self.node_attr_benchmarks)
-        degree     = oh.get_node_degree_obs(self.p_net, self.degree_benchmark)
-        link_max   = oh.get_link_aggr_attrs_obs(self.p_net, link_attr_types=['resource'],
-                                                aggr='max',
-                                                link_attr_benchmarks=self.link_attr_benchmarks)
-        link_sum   = oh.get_link_aggr_attrs_obs(self.p_net, link_attr_types=['resource'],
-                                                aggr='sum',
-                                                link_sum_attr_benchmarks=self.link_sum_attr_benchmarks)
-        node_data  = np.concatenate((node_data, degree, link_max, link_sum), axis=-1)
-        edge_index = oh.get_link_index_obs(self.p_net)
-        edge_attr  = oh.get_link_attrs_obs(self.p_net, link_attr_types=['resource'],
-                                           link_attr_benchmarks=self.link_attr_benchmarks)
-        return {'x': node_data, 'edge_index': edge_index, 'edge_attr': edge_attr}
-
-    def _get_v_net_obs(self):
-        oh = self.obs_handler
-        node_data  = oh.get_node_attrs_obs(self.v_net, node_attr_types=['resource'],
-                                           node_attr_benchmarks=self.node_attr_benchmarks)
-        degree     = oh.get_node_degree_obs(self.v_net, self.degree_benchmark)
-        link_max   = oh.get_link_aggr_attrs_obs(self.v_net, link_attr_types=['resource'],
-                                                aggr='max',
-                                                link_attr_benchmarks=self.link_attr_benchmarks)
-        link_sum   = oh.get_link_aggr_attrs_obs(self.v_net, link_attr_types=['resource'],
-                                                aggr='sum',
-                                                link_sum_attr_benchmarks=self.link_sum_attr_benchmarks)
-        node_data  = np.concatenate((node_data, degree, link_max, link_sum), axis=-1)
-        edge_index = oh.get_link_index_obs(self.v_net)
-        edge_attr  = oh.get_link_attrs_obs(self.v_net, link_attr_types=['resource'],
-                                           link_attr_benchmarks=self.link_attr_benchmarks)
-        return {'x': node_data, 'edge_index': edge_index, 'edge_attr': edge_attr}
 
     def _get_v_net_attrs_obs(self):
         """Normalized lifetime scalar (matches original env.py)."""
