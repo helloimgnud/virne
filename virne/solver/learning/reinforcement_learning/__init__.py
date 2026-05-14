@@ -9,3 +9,4 @@ from .gnn_seq2seq_solver.gnn_seq2seq_solver import *
 from .mcts_solver import *
 from .safe_rl_solver.solver import *
 from .hetero_gnn_solver import *
+from .hrl_ac_solver import *
